@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FlowPilot Mobile — Permissions
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Network: komunikace s Orchestrátorem (WebSocket / HTTP) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground Service: Android nezabije senzorovou službu -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Notification: povinné pro Android 13+ k zobrazení foreground notifikace -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Usage Stats: detekce aplikace v popředí (vyžaduje ruční povolení v nastavení) -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- System Alert Window: celoobrazovkový overlay pro intervence -->
+    <uses-permission
+        android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Wake Lock: udržet WebSocket spojení živé -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Screen state: detekce zapnutí/vypnutí displeje -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:name=".FlowPilotApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FlowPilot"
+        tools:targetApi="35">
+
+        <!-- ═══ MainActivity ═══ -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.FlowPilot">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ═══ Foreground Service — senzor (screen + app detection) ═══ -->
+        <service
+            android:name=".service.SensorService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- ═══ Overlay Service — blokační overlay při intervenci ═══ -->
+        <service
+            android:name=".overlay.OverlayService"
+            android:exported="false" />
+
+        <!-- ═══ BroadcastReceiver — screen on/off ═══ -->
+        <receiver
+            android:name=".service.ScreenReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.SCREEN_ON" />
+                <action android:name="android.intent.action.SCREEN_OFF" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

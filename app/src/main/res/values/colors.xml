@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="flowpilot_primary">#FF1A237E</color>
+    <color name="flowpilot_secondary">#FFFF8F00</color>
+    <color name="flowpilot_tertiary">#FF00695C</color>
+    <color name="flowpilot_error">#FFD32F2F</color>
+    <color name="status_connected">#FF2E7D32</color>
+    <color name="status_disconnected">#FFC62828</color>
+</resources>
