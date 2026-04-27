@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -68,6 +69,12 @@ dependencies {
 
     // ── Activity Compose ──
     implementation(libs.androidx.activity.compose)
+
+    // ── Navigation Compose ──
+    implementation(libs.androidx.navigation.compose)
+
+    // ── Kotlin Serialization (for type-safe navigation routes) ──
+    implementation(libs.kotlinx.serialization.json)
 
     // ── Networking — OkHttp (WebSocket + HTTP) ──
     implementation(libs.okhttp)
