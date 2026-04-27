@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cz.julek.rails.network.ConnectionState
 import cz.julek.rails.network.WebSocketManager
+import cz.julek.rails.service.SensorService
 
 /**
  * Dashboard Screen — Sensor configuration & connection management.
@@ -111,8 +112,12 @@ fun DashboardScreen() {
                         return@Button
                     }
                     errorMessage = null
-                    // TODO: Start SensorService
-                    WebSocketManager.connect(serverAddress)
+                    // Start SensorService + WebSocket connection
+                    val serviceIntent = Intent(context, SensorService::class.java).apply {
+                        action = SensorService.ACTION_START
+                        putExtra(SensorService.EXTRA_SERVER_ADDRESS, serverAddress)
+                    }
+                    context.startForegroundService(serviceIntent)
                 }
             },
             modifier = Modifier

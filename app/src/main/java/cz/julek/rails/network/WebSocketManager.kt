@@ -1,35 +1,37 @@
 package cz.julek.rails.network
 
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.*
+import okio.ByteString
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * WebSocket Manager — bi-directional communication hub for the Orchestrator.
+ * WebSocket Manager — bidirectional communication hub with Rails Orchestrator.
  *
- * This singleton handles two distinct data channels over a single WebSocket:
+ * Connects via OkHttp WebSocket to ws://<server>:3000/ws
  *
- *   1. SENSOR channel — telemetry (screen_on/off, foreground app changes)
- *      Outgoing only: phone → Orchestrator
- *      Format: { "type": "phone_state", "screen_on": true, "app": "Instagram" }
+ * Three data channels over a single connection:
  *
- *   2. CHAT channel — user ↔ AI text messages
- *      Bidirectional: user text → Orchestrator, AI response → user
- *      Format: { "type": "chat", "text": "..." }
+ *   1. SENSOR — phone_state telemetry (screen_on, foreground app)
+ *      Phone → Server: { "type": "phone_state", "screen_on": true, "app": "Instagram" }
  *
- *   3. COMMAND channel — Orchestrator → phone interventions
- *      Incoming only: INTERVENE / CLEAR overlay commands
- *      Format: { "type": "command", "action": "INTERVENE", "message": "..." }
+ *   2. CHAT — user ↔ AI text messages
+ *      Phone → Server: { "type": "chat", "text": "..." }
+ *      Server → Phone: { "type": "chat", "text": "..." }
  *
- * Full OkHttp WebSocket implementation comes in Phase 2.
- * This skeleton provides the state flow architecture and message models
- * so that UI (DashboardScreen, ChatScreen) can already observe and react.
+ *   3. COMMAND — server-initiated interventions
+ *      Server → Phone: { "type": "command", "action": "INTERVENE", "message": "..." }
+ *      Server → Phone: { "type": "command", "action": "CLEAR" }
  */
 object WebSocketManager {
+
+    private const val TAG = "Rails/WS"
 
     // ═══════════════════════════════════════════════════════════════════
     //  Connection State
@@ -48,11 +50,29 @@ object WebSocketManager {
     private val messageIdCounter = AtomicLong(0)
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Sensor State (latest reading)
+    //  OkHttp WebSocket
+    // ═══════════════════════════════════════════════════════════════════
+
+    private val client = OkHttpClient.Builder()
+        .pingInterval(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
+    private var webSocket: WebSocket? = null
+    private var currentAddress: String = ""
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Sensor State
     // ═══════════════════════════════════════════════════════════════════
 
     private var lastScreenOn: Boolean = false
     private var lastForegroundApp: String = ""
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Intervention Listener
+    // ═══════════════════════════════════════════════════════════════════
+
+    var onIntervene: ((message: String) -> Unit)? = null
+    var onClear: (() -> Unit)? = null
 
     // ═══════════════════════════════════════════════════════════════════
     //  Connection Lifecycle
@@ -63,45 +83,164 @@ object WebSocketManager {
      * @param address Format: "192.168.1.50:3000"
      */
     fun connect(address: String) {
+        if (_connectionState.value == ConnectionState.CONNECTING ||
+            _connectionState.value == ConnectionState.CONNECTED) {
+            Log.w(TAG, "Already connecting/connected — ignoring duplicate connect()")
+            return
+        }
+
         _connectionState.value = ConnectionState.CONNECTING
+        currentAddress = address
 
-        // TODO: OkHttp WebSocket connection to ws://<address>/ws
-        // On success: _connectionState.value = ConnectionState.CONNECTED
-        // On failure: _connectionState.value = ConnectionState.DISCONNECTED
+        val wsUrl = "ws://$address/ws"
+        Log.i(TAG, "Connecting to $wsUrl")
 
-        // ── Simulated for Phase 1 (UI testing) ──
-        // Simulate connection delay then mark connected
-        Thread {
-            Thread.sleep(800)
-            _connectionState.value = ConnectionState.CONNECTED
-            addSystemMessage("Připojeno k serveru $address")
+        val request = Request.Builder()
+            .url(wsUrl)
+            .build()
 
-            // Simulate a welcome message from the Orchestrator
-            Thread.sleep(1200)
-            addOrchestratorMessage(
-                "Ahoj! Jsem Rails, tvůj AI asistent. " +
-                "Sleduji tvou pozornost a pomůžu ti zůstat v pásmu. " +
-                "Co potřebuješ?"
-            )
-        }.start()
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.i(TAG, "WebSocket connected!")
+                _connectionState.value = ConnectionState.CONNECTED
+                addSystemMessage("Připojeno k serveru $address")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                Log.d(TAG, "WS ← $text")
+                handleIncomingMessage(text)
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                // Binary messages not used
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.i(TAG, "WebSocket closing: code=$code reason=$reason")
+                webSocket.close(1000, null)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.i(TAG, "WebSocket closed: code=$code")
+                _connectionState.value = ConnectionState.DISCONNECTED
+                addSystemMessage("Spojení uzavřeno")
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "WebSocket failure: ${t.message}")
+                _connectionState.value = ConnectionState.DISCONNECTED
+                addSystemMessage("Chyba připojení: ${t.message}")
+            }
+        })
     }
 
     /**
      * Disconnect from the server.
      */
     fun disconnect() {
-        // TODO: Close WebSocket connection
-        addSystemMessage("Odpojeno od serveru")
+        Log.i(TAG, "Disconnecting...")
+        webSocket?.close(1000, "Client disconnect")
+        webSocket = null
         _connectionState.value = ConnectionState.DISCONNECTED
+        addSystemMessage("Odpojeno od serveru")
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Sensor Channel — send telemetry
+    //  Incoming Message Handler
+    // ═══════════════════════════════════════════════════════════════════
+
+    private fun handleIncomingMessage(raw: String) {
+        try {
+            // Simple JSON parsing without kotlinx.serialization for now
+            val msg = parseJsonToMap(raw) ?: return
+            val type = msg["type"] as? String ?: return
+
+            when (type) {
+                "welcome" -> {
+                    val zone = msg["argusZone"] as? String ?: "?"
+                    val score = msg["focusScore"] as? Number ?: 0
+                    addOrchestratorMessage(
+                        "Připojeno! Aktuální stav: zóna=$zone, focus=${score.toDouble().toFixed(2)}"
+                    )
+                }
+                "ack" -> {
+                    Log.d(TAG, "Ack received for: ${msg["for"]}")
+                }
+                "chat" -> {
+                    val text = msg["text"] as? String ?: ""
+                    if (text.isNotEmpty()) {
+                        addOrchestratorMessage(text)
+                    }
+                }
+                "command" -> {
+                    val action = msg["action"] as? String ?: ""
+                    val message = msg["message"] as? String ?: ""
+                    when (action) {
+                        "INTERVENE" -> {
+                            Log.w(TAG, "INTERVENE command received: $message")
+                            addSystemMessage("🚨 INTERVENCE: $message")
+                            onIntervene?.invoke(message)
+                        }
+                        "CLEAR" -> {
+                            Log.i(TAG, "CLEAR command received")
+                            addSystemMessage("Intervence zrušena")
+                            onClear?.invoke()
+                        }
+                    }
+                }
+                "pong" -> {
+                    // Keepalive response — ignore
+                }
+                else -> {
+                    Log.w(TAG, "Unknown message type: $type")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse incoming message: ${e.message}")
+        }
+    }
+
+    /**
+     * Minimal JSON parser for flat key-value maps.
+     * Handles {"key":"value","key2":123} format.
+     */
+    private fun parseJsonToMap(json: String): Map<String, Any>? {
+        return try {
+            val trimmed = json.trim()
+            if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null
+            val content = trimmed.substring(1, trimmed.length - 1)
+            val result = mutableMapOf<String, Any>()
+            // Simple regex-based parsing for flat JSON
+            val regex = """"([^"]+)"\s*:\s*(?:"([^"]*)"|([\d.]+)|(\w+))""".toRegex()
+            regex.findAll(content).forEach { match ->
+                val key = match.groupValues[1]
+                val value: Any = when {
+                    match.groupValues[2].isNotEmpty() -> match.groupValues[2] // string
+                    match.groupValues[3].isNotEmpty() -> { // number
+                        val numStr = match.groupValues[3]
+                        numStr.toDoubleOrNull() ?: numStr
+                    }
+                    match.groupValues[4].isNotEmpty() -> match.groupValues[4] // bool/null
+                    else -> ""
+                }
+                result[key] = value
+            }
+            result
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Sensor Channel
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * Send phone sensor state to the Orchestrator.
      * Called by SensorService when screen_on or foreground app changes.
+     *
+     * Payload matches the format Orchestrator expects:
+     * { "type": "phone_state", "screen_on": true, "app": "Instagram" }
      */
     fun sendState(screenOn: Boolean, foregroundApp: String) {
         lastScreenOn = screenOn
@@ -109,62 +248,47 @@ object WebSocketManager {
 
         if (_connectionState.value != ConnectionState.CONNECTED) return
 
-        // TODO: Send JSON via WebSocket
-        // val json = """{"type":"phone_state","screen_on":$screenOn,"app":"$foregroundApp"}"""
-        // webSocket?.send(json)
+        val json = """{"type":"phone_state","screen_on":$screenOn,"app":"${foregroundApp.replace("\"", "\\\"")}"}"""
+        sendRaw(json)
+        Log.d(TAG, "WS → phone_state: screen_on=$screenOn, app=$foregroundApp")
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Chat Channel — send/receive messages
+    //  Chat Channel
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * Send a chat message from the user to the Orchestrator.
+     *
+     * Payload: { "type": "chat", "text": "..." }
      */
     fun sendChatMessage(text: String) {
         if (_connectionState.value != ConnectionState.CONNECTED) return
         if (text.isBlank()) return
 
-        // Add user message to local list immediately
         addUserMessage(text)
 
-        // TODO: Send via WebSocket
-        // val json = """{"type":"chat","text":"${text.replace("\"", "\\\"")}"}"""
-        // webSocket?.send(json)
-
-        // ── Simulated AI response for Phase 1 (UI testing) ──
-        Thread {
-            Thread.sleep(1500)
-            addOrchestratorMessage(simulateResponse(text))
-        }.start()
-    }
-
-    /**
-     * Called when a chat message arrives from the Orchestrator via WebSocket.
-     * (Will be wired to WebSocket onMessage in Phase 2)
-     */
-    private fun onChatMessageReceived(text: String) {
-        addOrchestratorMessage(text)
+        val json = """{"type":"chat","text":"${text.replace("\"", "\\\"").replace("\n", "\\n")}"}"""
+        sendRaw(json)
+        Log.d(TAG, "WS → chat: ${text.substring(0, minOf(80, text.length))}")
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Command Channel — receive interventions
+    //  Raw Send
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * Called when an INTERVENE/CLEAR command arrives from the Orchestrator.
-     * (Will be wired to WebSocket onMessage in Phase 2)
-     */
-    private fun onCommandReceived(action: String, message: String) {
-        when (action) {
-            "INTERVENE" -> {
-                // TODO: Start OverlayService with the message
-                addSystemMessage("INTERVENCE: $message")
+    private fun sendRaw(json: String): Boolean {
+        return try {
+            val ws = webSocket
+            if (ws != null) {
+                ws.send(json)
+            } else {
+                Log.w(TAG, "Cannot send — WebSocket is null")
+                false
             }
-            "CLEAR" -> {
-                // TODO: Stop OverlayService
-                addSystemMessage("Intervence zrušena")
-            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Send failed: ${e.message}")
+            false
         }
     }
 
@@ -202,48 +326,8 @@ object WebSocketManager {
         _messages.value = _messages.value + msg
     }
 
-    /**
-     * Clear all chat messages.
-     */
     fun clearMessages() {
         _messages.value = emptyList()
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  Simulation (Phase 1 only — removed when WebSocket is implemented)
-    // ═══════════════════════════════════════════════════════════════════
-
-    private fun simulateResponse(userText: String): String {
-        val lower = userText.lowercase()
-        return when {
-            lower.contains("plán") || lower.contains("plan") ->
-                "Dnes máš naplánovaný deep work blok 14:00–16:00. " +
-                "Zatím jsi v pásmu — pokračuj!"
-
-            lower.contains("focus") || lower.contains("skóre") || lower.contains("score") ->
-                "Tvé aktuální Focus Score je 0.85 — jsi v zóně deep focus. " +
-                "VS Code na popředí, žádný mobil. Jen tak dál!"
-
-            lower.contains("cíl") || lower.contains("goal") ->
-                "Máš 3 aktivní cíle: 1) dokončit refaktor Orchestrátoru, " +
-                "2) napsat testy pro tracker, 3) připravit demo. " +
-                "Který chceš rozebrat?"
-
-            lower.contains("přestáv") || lower.contains("break") ->
-                "Ještě ne — tvůj focus score je stabilní. " +
-                "Doporučuji počkat na přirozený pokles. " +
-                "Upozorním tě, až bude čas na pauzu."
-
-            lower.contains("ahoj") || lower.contains("čau") || lower.contains("hello") ->
-                "Ahoj! Jsem Rails, tvůj produktivní parťák. " +
-                "Můžu sledovat tvůj focus, spravovat cíle, nebo tě nakopat, " +
-                "když se začneš dívat na YouTube. Co potřebuješ?"
-
-            else ->
-                "Přijato. Zpracovávám tvůj požadavek... " +
-                "Jako tvůj AI supervizor ti doporučuji zůstat v práci — " +
-                "tvůj focus score je momentálně stabilní."
-        }
     }
 }
 
@@ -272,3 +356,7 @@ data class ChatMessage(
     val timestampText: String
         get() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
 }
+
+// Helper extension for Double formatting
+private fun Double.toFixed(digits: Int): String =
+    String.format("%.${digits}f", this)
