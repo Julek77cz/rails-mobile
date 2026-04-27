@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.ui.theme
+package cz.julek.rails.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -7,16 +7,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 
 private val LightColorScheme = lightColorScheme(
-    primary = FlowPilotPrimary,
-    onPrimary = FlowPilotOnPrimary,
-    secondary = FlowPilotSecondary,
-    onSecondary = FlowPilotOnSecondary,
-    tertiary = FlowPilotTertiary,
-    onTertiary = FlowPilotOnTertiary,
-    error = FlowPilotError,
-    onError = FlowPilotOnError,
-    background = FlowPilotBackgroundLight,
-    surface = FlowPilotSurfaceLight,
+    primary = RailsPrimary,
+    onPrimary = RailsOnPrimary,
+    secondary = RailsSecondary,
+    onSecondary = RailsOnSecondary,
+    tertiary = RailsTertiary,
+    onTertiary = RailsOnTertiary,
+    error = RailsError,
+    onError = RailsOnError,
+    background = RailsBackgroundLight,
+    surface = RailsSurfaceLight,
     onBackground = Color(0xFF1C1B1F),
     onSurface = Color(0xFF1C1B1F),
     surfaceContainer = Color(0xFFF0F0F3),
@@ -34,8 +34,8 @@ private val DarkColorScheme = darkColorScheme(
     onTertiary = Color(0xFF003731),
     error = Color(0xFFEF9A9A),
     onError = Color(0xFF690005),
-    background = FlowPilotBackgroundDark,
-    surface = FlowPilotSurfaceDark,
+    background = RailsBackgroundDark,
+    surface = RailsSurfaceDark,
     onBackground = Color(0xFFE6E1E5),
     onSurface = Color(0xFFE6E1E5),
     surfaceContainer = Color(0xFF1C2128),
@@ -45,7 +45,7 @@ private val DarkColorScheme = darkColorScheme(
 )
 
 @Composable
-fun FlowPilotTheme(
+fun RailsTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit

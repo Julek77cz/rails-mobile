@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.service
+package cz.julek.rails.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,7 +9,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
 /**
- * FlowPilot Sensor Service — Foreground Service
+ * Rails Sensor Service — Foreground Service
  *
  * Runs continuously in the background and:
  * 1. Detects screen on/off via BroadcastReceiver
@@ -21,11 +21,11 @@ import androidx.core.app.NotificationCompat
 class SensorService : Service() {
 
     companion object {
-        const val CHANNEL_ID = "flowpilot_sensor"
+        const val CHANNEL_ID = "rails_sensor"
         const val NOTIFICATION_ID = 1001
 
-        const val ACTION_START = "cz.julek.flowpilot.action.START_SENSOR"
-        const val ACTION_STOP = "cz.julek.flowpilot.action.STOP_SENSOR"
+        const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
+        const val ACTION_STOP = "cz.julek.rails.action.STOP_SENSOR"
 
         const val EXTRA_SERVER_ADDRESS = "server_address"
     }
@@ -59,7 +59,7 @@ class SensorService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "FlowPilot Sensor",
+            "Rails Sensor",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Senzor sledování aktivity na pozadí"
@@ -71,7 +71,7 @@ class SensorService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("FlowPilot senzor aktivní")
+            .setContentTitle("Rails senzor aktivní")
             .setContentText("Sleduji aktivitu a odesílám data na PC")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)

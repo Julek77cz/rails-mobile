@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.ui.theme
+package cz.julek.rails.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle

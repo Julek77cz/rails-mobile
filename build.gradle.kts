@@ -1,4 +1,4 @@
-// Top-level build file — FlowPilot Mobile
+// Top-level build file — Rails Mobile
 plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.kotlin.android) apply false

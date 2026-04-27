@@ -1,4 +1,4 @@
-package cz.julek.flowpilot
+package cz.julek.rails
 
 import android.app.UsageStatsManager
 import android.content.Context
@@ -31,18 +31,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import cz.julek.flowpilot.ui.theme.FlowPilotTheme
+import cz.julek.rails.ui.theme.RailsTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            FlowPilotTheme {
+            RailsTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    FlowPilotApp()
+                    RailsApp()
                 }
             }
         }
@@ -55,7 +55,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FlowPilotApp() {
+fun RailsApp() {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
@@ -101,7 +101,7 @@ fun FlowPilotApp() {
                             tint = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            "FlowPilot Mobile",
+                            "Rails Mobile",
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -348,7 +348,7 @@ fun FlowPilotApp() {
 
             // Version footer
             Text(
-                "FlowPilot Mobile v1.0.0 — Phase 1",
+                "Rails Mobile v1.0.0 — Phase 1",
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.Center,
                 fontSize = 11.sp,
@@ -441,7 +441,7 @@ fun ServerInputField(
             shape = RoundedCornerShape(12.dp)
         )
         Text(
-            "Zadej IP adresu počítače, na kterém běží FlowPilot Orchestrátor",
+            "Zadej IP adresu počítače, na kterém běží Rails Orchestrátor",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.padding(start = 4.dp, top = 2.dp)

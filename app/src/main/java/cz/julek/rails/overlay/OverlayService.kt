@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.overlay
+package cz.julek.rails.overlay
 
 import android.app.Service
 import android.content.Intent
@@ -9,7 +9,7 @@ import android.widget.FrameLayout
 import android.widget.TextView
 
 /**
- * FlowPilot Overlay Service — Intervention Display
+ * Rails Overlay Service — Intervention Display
  *
  * When the Orchestrator sends an INTERVENE command, this service
  * displays a full-screen, non-dismissible red overlay with a message.
@@ -21,8 +21,8 @@ import android.widget.TextView
 class OverlayService : Service() {
 
     companion object {
-        const val ACTION_INTERVENE = "cz.julek.flowpilot.action.INTERVENE"
-        const val ACTION_CLEAR = "cz.julek.flowpilot.action.CLEAR"
+        const val ACTION_INTERVENE = "cz.julek.rails.action.INTERVENE"
+        const val ACTION_CLEAR = "cz.julek.rails.action.CLEAR"
         const val EXTRA_MESSAGE = "message"
     }
 

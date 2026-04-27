@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.service
+package cz.julek.rails.service
 
 import android.content.BroadcastReceiver
 import android.content.Context

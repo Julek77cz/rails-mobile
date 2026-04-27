@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">FlowPilot</string>
-    <string name="sensor_notification_title">FlowPilot senzor aktivní</string>
+    <string name="app_name">Rails</string>
+    <string name="sensor_notification_title">Rails senzor aktivní</string>
     <string name="sensor_notification_text">Sleduji aktivitu a odesílám data na PC</string>
     <string name="permission_usage_stats">Přístup k využití aplikací</string>
     <string name="permission_overlay">Zobrazení přes jiné aplikace</string>

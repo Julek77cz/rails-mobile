@@ -5,11 +5,11 @@ plugins {
 }
 
 android {
-    namespace = "cz.julek.flowpilot"
+    namespace = "cz.julek.rails"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "cz.julek.flowpilot"
+        applicationId = "cz.julek.rails"
         minSdk = 26          // Android 8.0 Oreo — UsageStatsManager + Foreground Service
         targetSdk = 35       // Android 15
         versionCode = 1

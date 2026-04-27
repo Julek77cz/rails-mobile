@@ -1,4 +1,4 @@
-package cz.julek.flowpilot.network
+package cz.julek.rails.network
 
 /**
  * WebSocket Manager — handles bi-directional communication with Orchestrator.
