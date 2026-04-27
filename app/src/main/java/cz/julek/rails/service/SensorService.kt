@@ -13,6 +13,8 @@ import android.content.IntentFilter
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
+import android.view.Display
+import android.hardware.display.DisplayManager
 import androidx.core.app.NotificationCompat
 import cz.julek.rails.network.WebSocketManager
 import java.util.concurrent.Executors
@@ -24,12 +26,23 @@ import java.util.concurrent.TimeUnit
  *
  * Runs continuously and collects:
  *   1. Screen on/off state (via BroadcastReceiver + PowerManager)
- *   2. Foreground app name (via UsageStatsManager)
+ *   2. Device locked/unlocked state (via KeyguardManager + USER_PRESENT broadcast)
+ *   3. Foreground app name (via UsageStatsManager)
  *
  * Sends changes to the Orchestrator via WebSocketManager in the format:
- *   { "type": "phone_state", "screen_on": true, "app": "Instagram" }
+ *   { "type": "phone_state", "screen_on": true, "app": "com.instagram.android", "device_locked": false }
  *
- * This payload is identical to what POST /api/phone expects — full compatibility.
+ * Backward compatibility:
+ *   - The 'device_locked' field is NEW — the orchestrator handles both:
+ *     - Old payload: { "type": "phone_state", "screen_on": true, "app": "..." }
+ *     - New payload: { "type": "phone_state", "screen_on": true, "app": "...", "device_locked": false }
+ *   - If 'device_locked' is missing, the orchestrator assumes NOT locked (safe default).
+ *
+ * Detection logic:
+ *   - screen_on: PowerManager.isInteractive (real-time, not static text)
+ *   - device_locked: True when screen is on but keyguard is showing,
+ *     or when screen is off. Set to false on USER_PRESENT broadcast.
+ *   - app: UsageStatsManager foreground app (only when screen is on AND device is unlocked)
  */
 class SensorService : Service() {
 
@@ -49,6 +62,7 @@ class SensorService : Service() {
 
     private var screenReceiver: ScreenReceiver? = null
     private var isScreenOn: Boolean = false
+    private var isDeviceLocked: Boolean = true
     private var lastForegroundApp: String = ""
     private var scheduler: ScheduledExecutorService? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -92,12 +106,25 @@ class SensorService : Service() {
         // Connect WebSocket to Orchestrator
         WebSocketManager.connect(serverAddress)
 
-        // Detect initial screen state
+        // ── Detect initial screen state (REAL, not static) ──
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         isScreenOn = powerManager.isInteractive
-        Log.i(TAG, "Initial screen state: isScreenOn=$isScreenOn")
+        Log.i(TAG, "Initial screen state: isScreenOn=$isScreenOn (PowerManager.isInteractive)")
 
-        // Register screen on/off receiver
+        // ── Detect initial lock state ──
+        // If screen is off → device is locked.
+        // If screen is on → check keyguard state.
+        if (!isScreenOn) {
+            isDeviceLocked = true
+            Log.i(TAG, "Initial lock state: locked (screen is off)")
+        } else {
+            // Screen is on — check if keyguard is currently showing
+            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+            isDeviceLocked = keyguardManager.isDeviceLocked
+            Log.i(TAG, "Initial lock state: isDeviceLocked=$isDeviceLocked (KeyguardManager.isDeviceLocked)")
+        }
+
+        // Register screen on/off + USER_PRESENT receiver
         registerScreenReceiver()
 
         // Acquire partial wake lock (keeps CPU alive for polling)
@@ -135,7 +162,7 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Screen State Detection
+    //  Screen State + Lock Detection (REAL values)
     // ═══════════════════════════════════════════════════════════════════
 
     private fun registerScreenReceiver() {
@@ -144,15 +171,43 @@ class SensorService : Service() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_USER_PRESENT)  // User unlocked the device
         }
 
         registerReceiver(screenReceiver, filter)
 
-        // Also set up a direct callback from the receiver
-        ScreenReceiver.onScreenEvent = { screenOn ->
+        // Callback from ScreenReceiver — receives BOTH screen state AND lock state
+        ScreenReceiver.onScreenEvent = { screenOn, deviceLocked ->
+            val screenChanged = isScreenOn != screenOn
+            val lockChanged = isDeviceLocked != deviceLocked
+
             isScreenOn = screenOn
-            Log.i(TAG, "Screen state changed: isScreenOn=$isScreenOn")
-            sendCurrentState()
+            isDeviceLocked = deviceLocked
+
+            Log.i(TAG, "State changed: isScreenOn=$isScreenOn, isDeviceLocked=$isDeviceLocked " +
+                    "(screenChanged=$screenChanged, lockChanged=$lockChanged)")
+
+            // Send update if anything changed
+            if (screenChanged || lockChanged) {
+                sendCurrentState()
+            }
+        }
+    }
+
+    /**
+     * Double-check screen state using PowerManager before sending.
+     * This ensures we never send stale data — always the REAL current state.
+     */
+    private fun refreshScreenState() {
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val realScreenOn = powerManager.isInteractive
+            if (realScreenOn != isScreenOn) {
+                Log.w(TAG, "Screen state drift detected! BroadcastReceiver=$isScreenOn, PowerManager=$realScreenOn — correcting")
+                isScreenOn = realScreenOn
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to refresh screen state: ${e.message}")
         }
     }
 
@@ -165,6 +220,16 @@ class SensorService : Service() {
 
         scheduler?.scheduleAtFixedRate({
             try {
+                // Only detect foreground app when screen is on AND device is unlocked
+                if (!isScreenOn || isDeviceLocked) {
+                    // If screen is off or locked, app info is not relevant
+                    if (lastForegroundApp.isNotEmpty()) {
+                        lastForegroundApp = ""
+                        sendCurrentState()
+                    }
+                    return@scheduleAtFixedRate
+                }
+
                 val currentApp = getForegroundApp()
                 if (currentApp != null && currentApp != lastForegroundApp) {
                     lastForegroundApp = currentApp
@@ -174,7 +239,7 @@ class SensorService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "App polling error: ${e.message}")
             }
-        }, POLL_INTERVAL_S, POLL_INTERVALS, TimeUnit.SECONDS)
+        }, POLL_INTERVAL_S, POLL_INTERVAL_S, TimeUnit.SECONDS)
     }
 
     /**
@@ -211,18 +276,45 @@ class SensorService : Service() {
     /**
      * Send the current phone state to the Orchestrator.
      *
-     * Payload format (identical to what POST /api/phone expects):
-     *   { "type": "phone_state", "screen_on": true, "app": "com.instagram.android" }
+     * Before sending, we double-check the screen state using PowerManager
+     * to ensure we never send stale/incorrect data.
      *
-     * The Orchestrator handles both:
-     *   - WebSocket: routes via handleWsMessage → state.phone update
-     *   - HTTP POST: direct body { screen_on, app } → state.phone update
+     * Payload format (backward compatible with orchestrator):
+     *   { "type": "phone_state", "screen_on": true, "app": "com.instagram.android", "device_locked": false }
+     *
+     * Decision logic for 'app' field:
+     *   - Screen OFF → app = "" (no app is visible)
+     *   - Screen ON + Locked → app = "" (keyguard is showing, not a real app)
+     *   - Screen ON + Unlocked → app = actual foreground package name
+     *
+     * Decision logic for 'device_locked' field:
+     *   - Screen OFF → device_locked = true
+     *   - Screen ON + Keyguard → device_locked = true
+     *   - Screen ON + USER_PRESENT → device_locked = false
      */
     private fun sendCurrentState() {
-        val app = if (isScreenOn) lastForegroundApp else ""
-        WebSocketManager.sendState(screenOn = isScreenOn, foregroundApp = app)
+        // Refresh screen state from PowerManager (ensure REAL value)
+        refreshScreenState()
 
-        Log.d(TAG, "State sent: screen_on=$isScreenOn, app=$app")
+        // Determine app based on screen + lock state
+        val app = when {
+            !isScreenOn -> ""                    // Screen off → no app
+            isDeviceLocked -> ""                 // Locked → keyguard is showing
+            else -> lastForegroundApp            // Unlocked → real foreground app
+        }
+
+        // Determine device_locked:
+        // If screen is off, device is implicitly locked
+        val effectiveLocked = isDeviceLocked || !isScreenOn
+
+        // Send via WebSocket (with new device_locked field)
+        WebSocketManager.sendState(
+            screenOn = isScreenOn,
+            foregroundApp = app,
+            deviceLocked = effectiveLocked
+        )
+
+        Log.d(TAG, "State sent: screen_on=$isScreenOn, device_locked=$effectiveLocked, app=$app")
     }
 
     // ═══════════════════════════════════════════════════════════════════

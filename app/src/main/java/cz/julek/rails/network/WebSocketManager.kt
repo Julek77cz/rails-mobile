@@ -66,6 +66,7 @@ object WebSocketManager {
 
     private var lastScreenOn: Boolean = false
     private var lastForegroundApp: String = ""
+    private var lastDeviceLocked: Boolean = true
 
     // ═══════════════════════════════════════════════════════════════════
     //  Intervention Listener
@@ -237,20 +238,29 @@ object WebSocketManager {
 
     /**
      * Send phone sensor state to the Orchestrator.
-     * Called by SensorService when screen_on or foreground app changes.
+     * Called by SensorService when screen_on, foreground app, or lock state changes.
      *
-     * Payload matches the format Orchestrator expects:
-     * { "type": "phone_state", "screen_on": true, "app": "Instagram" }
+     * Payload format (backward compatible):
+     * { "type": "phone_state", "screen_on": true, "app": "Instagram", "device_locked": false }
+     *
+     * The 'device_locked' field is NEW — older orchestrator versions that don't
+     * know about it will simply ignore it (safe default: assumes not locked).
+     *
+     * Lock state semantics:
+     *   device_locked = true  → keyguard is showing OR screen is off
+     *   device_locked = false → screen is on AND user has unlocked the device
      */
-    fun sendState(screenOn: Boolean, foregroundApp: String) {
+    fun sendState(screenOn: Boolean, foregroundApp: String, deviceLocked: Boolean = true) {
         lastScreenOn = screenOn
         lastForegroundApp = foregroundApp
+        lastDeviceLocked = deviceLocked
 
         if (_connectionState.value != ConnectionState.CONNECTED) return
 
-        val json = """{"type":"phone_state","screen_on":$screenOn,"app":"${foregroundApp.replace("\"", "\\\"")}"}"""
+        val escapedApp = foregroundApp.replace("\"", "\\\"")
+        val json = """{"type":"phone_state","screen_on":$screenOn,"app":"$escapedApp","device_locked":$deviceLocked}"""
         sendRaw(json)
-        Log.d(TAG, "WS → phone_state: screen_on=$screenOn, app=$foregroundApp")
+        Log.d(TAG, "WS → phone_state: screen_on=$screenOn, app=$foregroundApp, device_locked=$deviceLocked")
     }
 
     // ═══════════════════════════════════════════════════════════════════
