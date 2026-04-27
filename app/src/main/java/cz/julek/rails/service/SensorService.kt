@@ -195,8 +195,9 @@ class SensorService : Service() {
     }
 
     /**
-     * Double-check screen state using PowerManager before sending.
-     * This ensures we never send stale data — always the REAL current state.
+     * Double-check screen state using PowerManager AND lock state using
+     * KeyguardManager before sending. This ensures we never send stale
+     * data — always the REAL current state from the system APIs.
      */
     private fun refreshScreenState() {
         try {
@@ -206,8 +207,18 @@ class SensorService : Service() {
                 Log.w(TAG, "Screen state drift detected! BroadcastReceiver=$isScreenOn, PowerManager=$realScreenOn — correcting")
                 isScreenOn = realScreenOn
             }
+
+            // Also re-verify lock state if screen is on
+            if (isScreenOn) {
+                val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+                val realLocked = keyguardManager.isDeviceLocked
+                if (realLocked != isDeviceLocked) {
+                    Log.w(TAG, "Lock state drift detected! Cached=$isDeviceLocked, KeyguardManager=$realLocked — correcting")
+                    isDeviceLocked = realLocked
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to refresh screen state: ${e.message}")
+            Log.e(TAG, "Failed to refresh screen/lock state: ${e.message}")
         }
     }
 
@@ -220,6 +231,13 @@ class SensorService : Service() {
 
         scheduler?.scheduleAtFixedRate({
             try {
+                // Renew wake lock in the polling loop
+                wakeLock?.let {
+                    if (it.isHeld) {
+                        it.acquire(4 * 60 * 60 * 1000L) // Renew for another 4 hours
+                    }
+                }
+
                 // Only detect foreground app when screen is on AND device is unlocked
                 if (!isScreenOn || isDeviceLocked) {
                     // If screen is off or locked, app info is not relevant

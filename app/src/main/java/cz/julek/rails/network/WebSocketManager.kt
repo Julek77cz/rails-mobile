@@ -10,6 +10,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
+import java.net.URL
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * WebSocket Manager — bidirectional communication hub with Rails Orchestrator.
@@ -59,6 +64,13 @@ object WebSocketManager {
 
     private var webSocket: WebSocket? = null
     private var currentAddress: String = ""
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    // ── Auto-reconnect ──
+    private var reconnectAttempts: Int = 0
+    private var reconnectJob: kotlinx.coroutines.Job? = null
+    private val MAX_RECONNECT_ATTEMPTS = 20
+    private var isIntentionalDisconnect: Boolean = false
 
     // ═══════════════════════════════════════════════════════════════════
     //  Sensor State
@@ -90,11 +102,20 @@ object WebSocketManager {
             return
         }
 
+        isIntentionalDisconnect = false
+        reconnectAttempts = 0
         _connectionState.value = ConnectionState.CONNECTING
         currentAddress = address
 
+        connectInternal(address)
+    }
+
+    /**
+     * Internal connection method — can be called for reconnects without resetting state.
+     */
+    private fun connectInternal(address: String) {
         val wsUrl = "ws://$address/ws"
-        Log.i(TAG, "Connecting to $wsUrl")
+        Log.i(TAG, "Connecting to $wsUrl (attempt ${reconnectAttempts + 1})")
 
         val request = Request.Builder()
             .url(wsUrl)
@@ -104,7 +125,8 @@ object WebSocketManager {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "WebSocket connected!")
                 _connectionState.value = ConnectionState.CONNECTED
-                addSystemMessage("Připojeno k serveru $address")
+                reconnectAttempts = 0 // Reset on successful connection
+                addSystemMessage("Připojeno k serveru $currentAddress")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -125,25 +147,66 @@ object WebSocketManager {
                 Log.i(TAG, "WebSocket closed: code=$code")
                 _connectionState.value = ConnectionState.DISCONNECTED
                 addSystemMessage("Spojení uzavřeno")
+                if (!isIntentionalDisconnect) {
+                    scheduleReconnect()
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure: ${t.message}")
                 _connectionState.value = ConnectionState.DISCONNECTED
                 addSystemMessage("Chyba připojení: ${t.message}")
+                if (!isIntentionalDisconnect) {
+                    scheduleReconnect()
+                }
             }
         })
     }
 
     /**
      * Disconnect from the server.
+     * Sets isIntentionalDisconnect to prevent auto-reconnect.
      */
     fun disconnect() {
         Log.i(TAG, "Disconnecting...")
+        isIntentionalDisconnect = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts = 0
         webSocket?.close(1000, "Client disconnect")
         webSocket = null
         _connectionState.value = ConnectionState.DISCONNECTED
         addSystemMessage("Odpojeno od serveru")
+    }
+
+    /**
+     * Schedule an automatic reconnect with exponential backoff.
+     * Delay: min(2^attempt * 1s, 60s) + random jitter
+     */
+    private fun scheduleReconnect() {
+        if (isIntentionalDisconnect) return
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            Log.w(TAG, "Max reconnect attempts ($MAX_RECONNECT_ATTEMPTS) reached — giving up")
+            addSystemMessage("Nepodařilo se připojit k serveru po $MAX_RECONNECT_ATTEMPTS pokusech")
+            return
+        }
+        if (currentAddress.isEmpty()) return
+
+        reconnectAttempts++
+        val baseDelayMs = minOf(1000L * (1L shl minOf(reconnectAttempts, 6)), 60_000L) // 2^n seconds, cap 60s
+        val jitterMs = (0..3000L).random() // 0-3s random jitter
+        val delayMs = baseDelayMs + jitterMs
+
+        Log.i(TAG, "Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS)")
+        addSystemMessage("Zkouším připojení za ${delayMs / 1000}s (pokus $reconnectAttempts)")
+
+        reconnectJob = serviceScope.launch {
+            kotlinx.coroutines.delay(delayMs)
+            if (!isIntentionalDisconnect && currentAddress.isNotEmpty()) {
+                _connectionState.value = ConnectionState.CONNECTING
+                connectInternal(currentAddress)
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -250,17 +313,105 @@ object WebSocketManager {
      *   device_locked = true  → keyguard is showing OR screen is off
      *   device_locked = false → screen is on AND user has unlocked the device
      */
+    /**
+     * Map of well-known Android package names to friendly names.
+     * This allows the orchestrator to display human-readable app names.
+     * The 'app' field still sends the raw package name for backward compatibility,
+     * but 'app_name' provides a friendly display name.
+     */
+    private val APP_FRIENDLY_NAMES = mapOf(
+        "com.instagram.android" to "Instagram",
+        "com.facebook.katana" to "Facebook",
+        "com.facebook.lite" to "Facebook Lite",
+        "com.zhiliaoapp.musically" to "TikTok",
+        "com.twitter.android" to "X (Twitter)",
+        "com.whatsapp" to "WhatsApp",
+        "com.telegram.messenger" to "Telegram",
+        "com.snapchat.android" to "Snapchat",
+        "com.reddit.frontpage" to "Reddit",
+        "com.google.android.youtube" to "YouTube",
+        "com.netflix.mediaclient" to "Netflix",
+        "com.spotify.music" to "Spotify",
+        "com.discord" to "Discord",
+        "com.tumblr" to "Tumblr",
+        "com.pinterest" to "Pinterest",
+        "com.twitch.android.app" to "Twitch",
+        "tv.twitch.android.app" to "Twitch",
+        "com.valvesoftware.steamlink" to "Steam Link",
+        "com.android.chrome" to "Chrome",
+        "org.mozilla.firefox" to "Firefox",
+        "com.google.android.gm" to "Gmail",
+        "com.google.android.apps.maps" to "Google Maps",
+        "com.google.android.apps.docs" to "Google Docs",
+        "com.microsoft.office.outlook" to "Outlook",
+        "com.microsoft.teams" to "Teams",
+        "com.slack" to "Slack",
+        "com.notion.android" to "Notion",
+        "md.obsidian" to "Obsidian",
+        "com.ichi2.anki" to "Anki",
+    )
+
+    /**
+     * Get a friendly display name for a package name.
+     * Returns the package name if no mapping exists.
+     */
+    private fun getFriendlyAppName(packageName: String): String {
+        return APP_FRIENDLY_NAMES[packageName] ?: packageName
+    }
+
     fun sendState(screenOn: Boolean, foregroundApp: String, deviceLocked: Boolean = true) {
         lastScreenOn = screenOn
         lastForegroundApp = foregroundApp
         lastDeviceLocked = deviceLocked
 
-        if (_connectionState.value != ConnectionState.CONNECTED) return
+        if (_connectionState.value != ConnectionState.CONNECTED) {
+            // Fallback: send via HTTP POST if WebSocket is not connected
+            sendStateViaHttp(screenOn, foregroundApp, deviceLocked)
+            return
+        }
 
+        val friendlyName = if (foregroundApp.isNotEmpty()) getFriendlyAppName(foregroundApp) else ""
         val escapedApp = foregroundApp.replace("\"", "\\\"")
-        val json = """{"type":"phone_state","screen_on":$screenOn,"app":"$escapedApp","device_locked":$deviceLocked}"""
+        val escapedFriendly = friendlyName.replace("\"", "\\\"")
+        val json = """{"type":"phone_state","screen_on":$screenOn,"app":"$escapedApp","app_name":"$escapedFriendly","device_locked":$deviceLocked}"""
         sendRaw(json)
-        Log.d(TAG, "WS → phone_state: screen_on=$screenOn, app=$foregroundApp, device_locked=$deviceLocked")
+        Log.d(TAG, "WS → phone_state: screen_on=$screenOn, app=$foregroundApp, app_name=$friendlyName, device_locked=$deviceLocked")
+    }
+
+    /**
+     * Send phone state via HTTP POST as a fallback.
+     * This ensures compatibility with the MacroDroid/legacy HTTP endpoint
+     * when the WebSocket connection is not available.
+     *
+     * POST /api/phone with JSON body:
+     *   { "screen_on": true, "app": "com.instagram.android", "device_locked": false }
+     */
+    private fun sendStateViaHttp(screenOn: Boolean, foregroundApp: String, deviceLocked: Boolean) {
+        if (currentAddress.isEmpty()) return
+
+        serviceScope.launch {
+            try {
+                val url = URL("http://$currentAddress/api/phone")
+                val jsonBody = """{"screen_on":$screenOn,"app":"${foregroundApp.replace("\"", "\\\"")}","device_locked":$deviceLocked}"""
+
+                val httpConn = url.openConnection() as java.net.HttpURLConnection
+                httpConn.requestMethod = "POST"
+                httpConn.setRequestProperty("Content-Type", "application/json")
+                httpConn.doOutput = true
+                httpConn.connectTimeout = 5000
+                httpConn.readTimeout = 5000
+
+                httpConn.outputStream.use { os ->
+                    os.write(jsonBody.toByteArray(Charsets.UTF_8))
+                }
+
+                val responseCode = httpConn.responseCode
+                Log.d(TAG, "HTTP POST /api/phone → $responseCode | body: $jsonBody")
+                httpConn.disconnect()
+            } catch (e: Exception) {
+                Log.w(TAG, "HTTP POST fallback failed: ${e.message}")
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
