@@ -3,7 +3,6 @@ package cz.julek.rails.ui.screens
 import android.app.UsageStatsManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.widget.Toast
@@ -28,15 +27,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cz.julek.rails.network.ConnectionState
-import cz.julek.rails.network.WebSocketManager
+import cz.julek.rails.network.FirebaseManager
 import cz.julek.rails.service.SensorService
 
 /**
  * Dashboard Screen — Sensor configuration & connection management.
  *
- * Contains: server address input, connect/disconnect button,
- * permission cards with deep-links to system settings,
- * and connection status banner.
+ * With Firebase migration, the user no longer needs to enter an IP address.
+ * Connection is fully automatic via Firebase Realtime Database.
+ * Contains: connect/disconnect button, permission cards, connection status banner.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -44,14 +43,12 @@ fun DashboardScreen() {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
-    // ── Connection State (observed from WebSocketManager) ──
-    val connectionState by WebSocketManager.connectionState.collectAsState()
+    // ── Connection State (observed from FirebaseManager) ──
+    val connectionState by FirebaseManager.connectionState.collectAsState()
     val isConnected = connectionState == ConnectionState.CONNECTED
     val isConnecting = connectionState == ConnectionState.CONNECTING
 
     // ── Local State ──
-    val sharedPrefs = context.getSharedPreferences("rails_prefs", Context.MODE_PRIVATE)
-    var serverAddress by remember { mutableStateOf(sharedPrefs.getString("last_server_address", "") ?: "") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     // Permission states
@@ -86,23 +83,17 @@ fun DashboardScreen() {
         // ── Status Banner ──
         ConnectionBanner(isConnected = isConnected, isConnecting = isConnecting)
 
-        // ── Server Address Input ──
-        ServerInputField(
-            address = serverAddress,
-            onAddressChange = { serverAddress = it },
-            enabled = !isConnected && !isConnecting
-        )
-
         // ── Connect Button ──
         Button(
             onClick = {
                 if (isConnected) {
-                    WebSocketManager.disconnect()
-                } else {
-                    if (serverAddress.isBlank()) {
-                        errorMessage = "Zadej IP adresu a port serveru"
-                        return@Button
+                    // Disconnect: stop the sensor service
+                    val serviceIntent = Intent(context, SensorService::class.java).apply {
+                        action = SensorService.ACTION_STOP
                     }
+                    context.startService(serviceIntent)
+                } else {
+                    // Connect: check permissions, then start sensor service
                     if (!hasUsageStats || !hasOverlay) {
                         errorMessage = "Nejprve povol všechna oprávnění"
                         return@Button
@@ -113,12 +104,9 @@ fun DashboardScreen() {
                         return@Button
                     }
                     errorMessage = null
-                    // Save server address for next time
-                    sharedPrefs.edit().putString("last_server_address", serverAddress).apply()
-                    // Start SensorService + WebSocket connection
+                    // Start SensorService (no IP address needed — Firebase handles it!)
                     val serviceIntent = Intent(context, SensorService::class.java).apply {
                         action = SensorService.ACTION_START
-                        putExtra(SensorService.EXTRA_SERVER_ADDRESS, serverAddress)
                     }
                     context.startForegroundService(serviceIntent)
                 }
@@ -135,13 +123,13 @@ fun DashboardScreen() {
             )
         ) {
             Icon(
-                imageVector = if (isConnected) Icons.Filled.LinkOff else Icons.Filled.Link,
+                imageVector = if (isConnected) Icons.Filled.LinkOff else Icons.Filled.Cloud,
                 contentDescription = null,
                 modifier = Modifier.size(20.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                if (isConnecting) "Připojuji..."
+                if (isConnecting) "Připojuji se k Firebase..."
                 else if (isConnected) "Odpojit"
                 else "Připojit a Spustit senzor",
                 fontWeight = FontWeight.SemiBold,
@@ -211,7 +199,7 @@ fun DashboardScreen() {
             onAction = {
                 val intent = Intent(
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:${context.packageName}")
+                    android.net.Uri.parse("package:${context.packageName}")
                 )
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(intent)
@@ -297,9 +285,9 @@ fun DashboardScreen() {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "1. Povol všechna oprávnění výše\n" +
-                    "2. Zadej IP adresu a port tvého PC (kde běží Orchestrátor)\n" +
-                    "3. Stiskni 'Připojit a Spustit senzor'\n" +
-                    "4. Aplikace odešle stav displeje a aktivní app na PC\n" +
+                    "2. Stiskni 'Připojit a Spustit senzor'\n" +
+                    "3. Aplikace se automaticky připojí přes Firebase cloud\n" +
+                    "4. Stav displeje a aktivní app se odesílají na PC\n" +
                     "5. Pokud klesne Focus Score, mobil zobrazí blokační overlay",
                     style = MaterialTheme.typography.bodySmall,
                     lineHeight = 20.sp,
@@ -310,7 +298,7 @@ fun DashboardScreen() {
 
         // Version footer
         Text(
-            "Rails Mobile v1.1.0 — Phase 1",
+            "Rails Mobile v2.0.0 — Firebase Edition",
             modifier = Modifier.fillMaxWidth(),
             textAlign = TextAlign.Center,
             fontSize = 11.sp,
@@ -338,12 +326,12 @@ fun ConnectionBanner(isConnected: Boolean, isConnecting: Boolean) {
     }
     val icon = when {
         isConnecting -> Icons.Filled.Sync
-        isConnected -> Icons.Filled.Wifi
-        else -> Icons.Filled.WifiOff
+        isConnected -> Icons.Filled.CloudDone
+        else -> Icons.Filled.CloudOff
     }
     val text = when {
-        isConnecting -> "Připojuji se k serveru..."
-        isConnected -> "Připojeno — senzor aktivní"
+        isConnecting -> "Připojuji se k Firebase..."
+        isConnected -> "Připojeno — senzor aktivní (Firebase)"
         else -> "Odpojeno — čeká na připojení"
     }
 
@@ -372,41 +360,6 @@ fun ConnectionBanner(isConnected: Boolean, isConnecting: Boolean) {
                 color = textColor
             )
         }
-    }
-}
-
-@Composable
-fun ServerInputField(
-    address: String,
-    onAddressChange: (String) -> Unit,
-    enabled: Boolean
-) {
-    Column {
-        Text(
-            "Orchestrátor Server",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        OutlinedTextField(
-            value = address,
-            onValueChange = onAddressChange,
-            label = { Text("IP adresa a port") },
-            placeholder = { Text("192.168.1.50:3000") },
-            singleLine = true,
-            enabled = enabled,
-            leadingIcon = {
-                Icon(Icons.Filled.Dns, contentDescription = null)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
-        )
-        Text(
-            "Zadej IP adresu počítače, na kterém běží Rails Orchestrátor",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.padding(start = 4.dp, top = 2.dp)
-        )
     }
 }
 

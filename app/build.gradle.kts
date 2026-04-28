@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -13,8 +14,8 @@ android {
         applicationId = "cz.julek.rails"
         minSdk = 26          // Android 8.0 Oreo — UsageStatsManager + Foreground Service
         targetSdk = 35       // Android 15
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -76,10 +77,10 @@ dependencies {
     // ── Kotlin Serialization (for type-safe navigation routes) ──
     implementation(libs.kotlinx.serialization.json)
 
-    // ── Networking — OkHttp (WebSocket + HTTP) ──
-    implementation(libs.okhttp)
-    implementation(libs.okhttp.logging)
-
     // ── Coroutines ──
     implementation(libs.kotlinx.coroutines.android)
+
+    // ── Firebase (BOM-managed) ──
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.database)
 }

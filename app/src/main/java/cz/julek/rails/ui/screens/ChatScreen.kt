@@ -17,24 +17,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import cz.julek.rails.network.ChatMessage
+import cz.julek.rails.network.ConnectionState
+import cz.julek.rails.network.FirebaseManager
 import cz.julek.rails.network.MessageRole
-import cz.julek.rails.network.WebSocketManager
 import kotlinx.coroutines.launch
 
 /**
  * Terminal / Chat Screen — primary communication interface with the Orchestrator AI.
  *
  * Displays a scrolling message log (LazyColumn) and an input bar
- * for sending text messages to the Orchestrator via WebSocket.
+ * for sending text messages to the Orchestrator via Firebase.
  * The Orchestrator's responses appear in real-time.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen() {
-    // ── Observe messages from WebSocketManager ──
-    val messages by WebSocketManager.messages.collectAsState()
-    val connectionState by WebSocketManager.connectionState.collectAsState()
-    val isConnected = connectionState == cz.julek.rails.network.ConnectionState.CONNECTED
+    // ── Observe messages from FirebaseManager ──
+    val messages by FirebaseManager.messages.collectAsState()
+    val connectionState by FirebaseManager.connectionState.collectAsState()
+    val isConnected = connectionState == ConnectionState.CONNECTED
 
     // ── Local state ──
     var inputText by remember { mutableStateOf("") }
@@ -153,7 +154,7 @@ fun ChatScreen() {
                     onClick = {
                         val text = inputText.trim()
                         if (text.isNotEmpty() && isConnected) {
-                            WebSocketManager.sendChatMessage(text)
+                            FirebaseManager.sendChatMessage(text)
                             inputText = ""
                         }
                     },

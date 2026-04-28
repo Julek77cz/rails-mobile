@@ -14,10 +14,9 @@ import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import android.view.Display
 import android.hardware.display.DisplayManager
 import androidx.core.app.NotificationCompat
-import cz.julek.rails.network.WebSocketManager
+import cz.julek.rails.network.FirebaseManager
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -30,14 +29,9 @@ import java.util.concurrent.TimeUnit
  *   2. Device locked/unlocked state (via KeyguardManager + USER_PRESENT broadcast)
  *   3. Foreground app name (via UsageStatsManager)
  *
- * Sends changes to the Orchestrator via WebSocketManager in the format:
- *   { "type": "phone_state", "screen_on": true, "app": "com.instagram.android", "device_locked": false }
- *
- * Backward compatibility:
- *   - The 'device_locked' field is NEW — the orchestrator handles both:
- *     - Old payload: { "type": "phone_state", "screen_on": true, "app": "..." }
- *     - New payload: { "type": "phone_state", "screen_on": true, "app": "...", "device_locked": false }
- *   - If 'device_locked' is missing, the orchestrator assumes NOT locked (safe default).
+ * Sends changes to the Orchestrator via FirebaseManager (Firebase RTDB):
+ *   Path: /rails/devices/my_phone/phone_state
+ *   Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false, "timestamp": ... }
  *
  * Detection logic:
  *   - screen_on: PowerManager.isInteractive (real-time, not static text)
@@ -54,8 +48,6 @@ class SensorService : Service() {
 
         const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
         const val ACTION_STOP = "cz.julek.rails.action.STOP_SENSOR"
-
-        const val EXTRA_SERVER_ADDRESS = "server_address"
 
         // How often to poll UsageStats for foreground app (seconds)
         private const val POLL_INTERVAL_S = 3L
@@ -76,8 +68,7 @@ class SensorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val address = intent.getStringExtra(EXTRA_SERVER_ADDRESS) ?: ""
-                startSensor(address)
+                startSensor()
             }
             ACTION_STOP -> {
                 stopSensor()
@@ -98,8 +89,8 @@ class SensorService : Service() {
     //  Start / Stop
     // ═══════════════════════════════════════════════════════════════════
 
-    private fun startSensor(serverAddress: String) {
-        Log.i(TAG, "Starting sensor service — server: $serverAddress")
+    private fun startSensor() {
+        Log.i(TAG, "Starting sensor service — connecting to Firebase")
 
         // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -112,8 +103,8 @@ class SensorService : Service() {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
 
-        // Connect WebSocket to Orchestrator
-        WebSocketManager.connect(serverAddress)
+        // Connect to Firebase (no IP address needed!)
+        FirebaseManager.connect()
 
         // ── Detect initial screen state (REAL, not static) ──
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -121,13 +112,10 @@ class SensorService : Service() {
         Log.i(TAG, "Initial screen state: isScreenOn=$isScreenOn (PowerManager.isInteractive)")
 
         // ── Detect initial lock state ──
-        // If screen is off → device is locked.
-        // If screen is on → check keyguard state.
         if (!isScreenOn) {
             isDeviceLocked = true
             Log.i(TAG, "Initial lock state: locked (screen is off)")
         } else {
-            // Screen is on — check if keyguard is currently showing
             val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
             isDeviceLocked = keyguardManager.isDeviceLocked
             Log.i(TAG, "Initial lock state: isDeviceLocked=$isDeviceLocked (KeyguardManager.isDeviceLocked)")
@@ -166,8 +154,8 @@ class SensorService : Service() {
         try { wakeLock?.release() } catch (e: Exception) { /* ignore */ }
         wakeLock = null
 
-        // Disconnect WebSocket
-        WebSocketManager.disconnect()
+        // Disconnect from Firebase
+        FirebaseManager.disconnect()
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -249,7 +237,6 @@ class SensorService : Service() {
 
                 // Only detect foreground app when screen is on AND device is unlocked
                 if (!isScreenOn || isDeviceLocked) {
-                    // If screen is off or locked, app info is not relevant
                     if (lastForegroundApp.isNotEmpty()) {
                         lastForegroundApp = ""
                         sendCurrentState()
@@ -287,7 +274,6 @@ class SensorService : Service() {
             val event = UsageEvents.Event()
             usageEvents.getNextEvent(event)
 
-            // MOVE_TO_FOREGROUND is the event we care about
             if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
                 lastEvent = event
             }
@@ -297,27 +283,17 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Send State to Orchestrator
+    //  Send State to Orchestrator via Firebase
     // ═══════════════════════════════════════════════════════════════════
 
     /**
-     * Send the current phone state to the Orchestrator.
+     * Send the current phone state to the Orchestrator via Firebase.
      *
      * Before sending, we double-check the screen state using PowerManager
      * to ensure we never send stale/incorrect data.
      *
-     * Payload format (backward compatible with orchestrator):
-     *   { "type": "phone_state", "screen_on": true, "app": "com.instagram.android", "device_locked": false }
-     *
-     * Decision logic for 'app' field:
-     *   - Screen OFF → app = "" (no app is visible)
-     *   - Screen ON + Locked → app = "" (keyguard is showing, not a real app)
-     *   - Screen ON + Unlocked → app = actual foreground package name
-     *
-     * Decision logic for 'device_locked' field:
-     *   - Screen OFF → device_locked = true
-     *   - Screen ON + Keyguard → device_locked = true
-     *   - Screen ON + USER_PRESENT → device_locked = false
+     * Firebase path: /rails/devices/my_phone/phone_state
+     * Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false, "timestamp": ... }
      */
     private fun sendCurrentState() {
         // Refresh screen state from PowerManager (ensure REAL value)
@@ -334,8 +310,8 @@ class SensorService : Service() {
         // If screen is off, device is implicitly locked
         val effectiveLocked = isDeviceLocked || !isScreenOn
 
-        // Send via WebSocket (with new device_locked field)
-        WebSocketManager.sendState(
+        // Send via Firebase
+        FirebaseManager.sendState(
             screenOn = isScreenOn,
             foregroundApp = app,
             deviceLocked = effectiveLocked
@@ -364,7 +340,7 @@ class SensorService : Service() {
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Rails senzor aktivní")
-            .setContentText("Sleduji aktivitu a odesílám data na PC")
+            .setContentText("Sleduji aktivitu a odesílám data přes Firebase")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
             .setSilent(true)

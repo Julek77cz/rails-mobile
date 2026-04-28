@@ -1,0 +1,41 @@
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Java/Kotlin class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
+*/build/
+
+# Local configuration file
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+.navigation/
+captures/
+
+# Keystore files (NEVER commit these!)
+*.jks
+*.keystore
+
+# Firebase google-services.json (contains API keys — DO NOT commit!)
+app/google-services.json
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
