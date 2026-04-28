@@ -50,7 +50,8 @@ fun DashboardScreen() {
     val isConnecting = connectionState == ConnectionState.CONNECTING
 
     // ── Local State ──
-    var serverAddress by remember { mutableStateOf("") }
+    val sharedPrefs = context.getSharedPreferences("rails_prefs", Context.MODE_PRIVATE)
+    var serverAddress by remember { mutableStateOf(sharedPrefs.getString("last_server_address", "") ?: "") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     // Permission states
@@ -112,6 +113,8 @@ fun DashboardScreen() {
                         return@Button
                     }
                     errorMessage = null
+                    // Save server address for next time
+                    sharedPrefs.edit().putString("last_server_address", serverAddress).apply()
                     // Start SensorService + WebSocket connection
                     val serviceIntent = Intent(context, SensorService::class.java).apply {
                         action = SensorService.ACTION_START

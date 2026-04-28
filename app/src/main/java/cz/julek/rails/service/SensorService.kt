@@ -10,6 +10,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
@@ -100,8 +101,16 @@ class SensorService : Service() {
     private fun startSensor(serverAddress: String) {
         Log.i(TAG, "Starting sensor service — server: $serverAddress")
 
-        // Start foreground notification
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        }
 
         // Connect WebSocket to Orchestrator
         WebSocketManager.connect(serverAddress)

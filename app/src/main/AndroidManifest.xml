@@ -12,7 +12,7 @@
 
     <!-- Foreground Service: Android nezabije senzorovou službu -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- Notification: povinné pro Android 13+ k zobrazení foreground notifikace -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -56,7 +56,7 @@
         <service
             android:name=".service.SensorService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="dataSync" />
 
         <!-- ═══ Overlay Service — blokační overlay při intervenci ═══ -->
         <service
