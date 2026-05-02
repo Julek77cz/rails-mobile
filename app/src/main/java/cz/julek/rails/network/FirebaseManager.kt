@@ -24,16 +24,16 @@ import java.util.concurrent.atomic.AtomicLong
  * firewall/NAT issues and enabling mobile data connectivity.
  *
  * Data paths in Firebase RTDB:
- *   /rails/devices/my_phone/phone_state   ← Written by Android (sensor data)
- *   /rails/devices/my_phone/command       ← Written by Node.js (INTERVENE/CLEAR)
- *   /rails/devices/my_phone/chat_inbox    ← Written by Android (user messages)
- *   /rails/devices/my_phone/chat_outbox   ← Written by Node.js (AI responses)
- *   /rails/devices/my_phone/focus_state   ← Written by Node.js (focus score)
+ *   /rails/devices/my_phone/phone_state   <- Written by Android (sensor data)
+ *   /rails/devices/my_phone/command       <- Written by Node.js (INTERVENE/BLOCK_APPS/UNBLOCK_APPS/LOCK_SCREEN/CLEAR)
+ *   /rails/devices/my_phone/chat_inbox    <- Written by Android (user messages)
+ *   /rails/devices/my_phone/chat_outbox   <- Written by Node.js (AI responses)
+ *   /rails/devices/my_phone/focus_state   <- Written by Node.js (focus score)
  *
- * Communication channels (same semantics as WebSocket):
- *   1. SENSOR — phone_state telemetry (screen_on, foreground app, device_locked)
- *   2. CHAT   — user ↔ AI text messages (inbox/outbox pattern)
- *   3. COMMAND — server-initiated interventions (INTERVENE/CLEAR)
+ * Communication channels:
+ *   1. SENSOR  — phone_state telemetry (screen_on, fg app, device_locked, battery, notifications)
+ *   2. CHAT    — user <-> AI text messages (inbox/outbox pattern)
+ *   3. COMMAND — server-initiated interventions (INTERVENE/BLOCK_APPS/UNBLOCK_APPS/LOCK_SCREEN/CLEAR)
  */
 object FirebaseManager {
 
@@ -58,6 +58,13 @@ object FirebaseManager {
     private val messageIdCounter = AtomicLong(0)
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Blocked Apps State (Phase 2)
+    // ═══════════════════════════════════════════════════════════════════
+
+    private val _blockedApps = MutableStateFlow<List<String>>(emptyList())
+    val blockedApps: StateFlow<List<String>> = _blockedApps.asStateFlow()
+
+    // ═══════════════════════════════════════════════════════════════════
     //  Firebase References
     // ═══════════════════════════════════════════════════════════════════
 
@@ -74,14 +81,17 @@ object FirebaseManager {
     private var lastCommandTimestamp: Long = 0
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Intervention Listener
+    //  Intervention Listeners (Phase 2 — expanded)
     // ═══════════════════════════════════════════════════════════════════
 
     var onIntervene: ((message: String) -> Unit)? = null
     var onClear: (() -> Unit)? = null
+    var onBlockApps: ((apps: List<String>, message: String) -> Unit)? = null
+    var onUnblockApps: ((message: String) -> Unit)? = null
+    var onLockScreen: ((message: String) -> Unit)? = null
 
     // ═══════════════════════════════════════════════════════════════════
-    //  App Name Mapping (legacy from WebSocketManager)
+    //  App Name Mapping
     // ═══════════════════════════════════════════════════════════════════
 
     private val APP_FRIENDLY_NAMES = mapOf(
@@ -116,7 +126,7 @@ object FirebaseManager {
         "com.ichi2.anki" to "Anki",
     )
 
-    private fun getFriendlyAppName(packageName: String): String {
+    fun getFriendlyAppName(packageName: String): String {
         return APP_FRIENDLY_NAMES[packageName] ?: packageName
     }
 
@@ -211,7 +221,7 @@ object FirebaseManager {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Command Listener (INTERVENE / CLEAR from orchestrator)
+    //  Command Listener (Phase 2 — expanded command set)
     // ═══════════════════════════════════════════════════════════════════
 
     private fun startCommandListener() {
@@ -233,8 +243,32 @@ object FirebaseManager {
                         addSystemMessage("🚨 INTERVENCE: $message")
                         onIntervene?.invoke(message)
                     }
+
+                    "BLOCK_APPS" -> {
+                        // Extract apps list from command data
+                        val appsList = (data["appsToBlock"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                        Log.w(TAG, "BLOCK_APPS command received: apps=$appsList message=$message")
+                        _blockedApps.value = appsList
+                        addSystemMessage("🚫 Blokováno: ${appsList.joinToString(", ")}")
+                        onBlockApps?.invoke(appsList, message)
+                    }
+
+                    "UNBLOCK_APPS" -> {
+                        Log.i(TAG, "UNBLOCK_APPS command received: $message")
+                        _blockedApps.value = emptyList()
+                        addSystemMessage("✅ Aplikace odblokovány")
+                        onUnblockApps?.invoke(message)
+                    }
+
+                    "LOCK_SCREEN" -> {
+                        Log.w(TAG, "LOCK_SCREEN command received: $message")
+                        addSystemMessage("🔒 Zamkni telefon: $message")
+                        onLockScreen?.invoke(message)
+                    }
+
                     "CLEAR" -> {
                         Log.i(TAG, "CLEAR command received")
+                        _blockedApps.value = emptyList()
                         addSystemMessage("Intervence zrušena")
                         onClear?.invoke()
                     }
@@ -276,19 +310,34 @@ object FirebaseManager {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Phone State Writer (sensor data → Firebase)
+    //  Phone State Writer (Phase 3 — extended sensor data)
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * Send phone sensor state to the Orchestrator via Firebase.
-     * Called by SensorService when screen_on, foreground app, or lock state changes.
+     * Called by SensorService when screen_on, foreground app, lock state, or battery changes.
      *
      * Writes to: /rails/devices/my_phone/phone_state
      * Payload format:
-     *   { "screen_on": true, "app": "com.instagram.android",
-     *     "app_name": "Instagram", "device_locked": false, "timestamp": 1234567890 }
+     *   {
+     *     "screen_on": true,
+     *     "app": "com.instagram.android",
+     *     "app_name": "Instagram",
+     *     "device_locked": false,
+     *     "timestamp": 1234567890,
+     *     "battery_level": 85,           // Phase 3: battery percentage
+     *     "notifications": ["..."],       // Phase 3: notification texts (if available)
+     *     "screen_text": ""              // Phase 3: screen content text (if available)
+     *   }
      */
-    fun sendState(screenOn: Boolean, foregroundApp: String, deviceLocked: Boolean = true) {
+    fun sendState(
+        screenOn: Boolean,
+        foregroundApp: String,
+        deviceLocked: Boolean = true,
+        batteryLevel: Int? = null,
+        notifications: List<String> = emptyList(),
+        screenText: String = ""
+    ) {
         val ref = deviceRef ?: run {
             Log.w(TAG, "Cannot send state — Firebase not connected")
             return
@@ -296,21 +345,48 @@ object FirebaseManager {
 
         val friendlyName = if (foregroundApp.isNotEmpty()) getFriendlyAppName(foregroundApp) else ""
 
-        val state = mapOf(
+        val state = mutableMapOf<String, Any?>(
             "screen_on" to screenOn,
             "app" to foregroundApp,
             "app_name" to friendlyName,
             "device_locked" to deviceLocked,
             "timestamp" to ServerValue.TIMESTAMP,
+            "battery_level" to batteryLevel,
         )
+
+        // Only include notifications if we have data (saves bandwidth)
+        if (notifications.isNotEmpty()) {
+            state["notifications"] = notifications
+        }
+
+        // Only include screen_text if non-empty (saves bandwidth)
+        if (screenText.isNotEmpty()) {
+            state["screen_text"] = screenText
+        }
 
         ref.child("phone_state").setValue(state)
             .addOnSuccessListener {
-                Log.d(TAG, "Phone state → Firebase: screen_on=$screenOn, app=$foregroundApp, device_locked=$deviceLocked")
+                Log.d(TAG, "Phone state -> Firebase: screen_on=$screenOn, app=$foregroundApp, " +
+                        "device_locked=$deviceLocked, battery=$batteryLevel, " +
+                        "notifs=${notifications.size}, screen_text_len=${screenText.length}")
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Failed to write phone state: ${e.message}")
             }
+    }
+
+    /**
+     * Legacy overload — backward compatible with old SensorService calls.
+     */
+    fun sendState(screenOn: Boolean, foregroundApp: String, deviceLocked: Boolean = true) {
+        sendState(
+            screenOn = screenOn,
+            foregroundApp = foregroundApp,
+            deviceLocked = deviceLocked,
+            batteryLevel = null,
+            notifications = emptyList(),
+            screenText = ""
+        )
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -336,11 +412,11 @@ object FirebaseManager {
 
         ref.child("chat_inbox").setValue(message)
             .addOnSuccessListener {
-                Log.d(TAG, "Chat → Firebase: ${text.substring(0, minOf(80, text.length))}")
+                Log.d(TAG, "Chat -> Firebase: ${text.substring(0, minOf(80, text.length))}")
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Failed to send chat message: ${e.message}")
-                addSystemMessage("Chyba odesílání: ${e.message}")
+                addSystemMessage("Chyba odesilani: ${e.message}")
             }
     }
 
@@ -408,7 +484,3 @@ data class ChatMessage(
     val timestampText: String
         get() = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
 }
-
-// Helper extension for Double formatting
-private fun Double.toFixed(digits: Int): String =
-    String.format("%.${digits}f", this)

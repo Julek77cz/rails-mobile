@@ -11,10 +11,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.os.BatteryManager
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import android.hardware.display.DisplayManager
 import androidx.core.app.NotificationCompat
 import cz.julek.rails.network.FirebaseManager
 import java.util.concurrent.Executors
@@ -22,22 +22,21 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 /**
- * Rails Sensor Service — Foreground Service
+ * Rails Sensor Service — Foreground Service (Phase 2+3)
  *
  * Runs continuously and collects:
  *   1. Screen on/off state (via BroadcastReceiver + PowerManager)
  *   2. Device locked/unlocked state (via KeyguardManager + USER_PRESENT broadcast)
  *   3. Foreground app name (via UsageStatsManager)
+ *   4. Battery level (via BatteryManager) — Phase 3
  *
  * Sends changes to the Orchestrator via FirebaseManager (Firebase RTDB):
  *   Path: /rails/devices/my_phone/phone_state
- *   Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false, "timestamp": ... }
+ *   Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false,
+ *              "timestamp": ..., "battery_level": 85, "notifications": [], "screen_text": "" }
  *
- * Detection logic:
- *   - screen_on: PowerManager.isInteractive (real-time, not static text)
- *   - device_locked: True when screen is on but keyguard is showing,
- *     or when screen is off. Set to false on USER_PRESENT broadcast.
- *   - app: UsageStatsManager foreground app (only when screen is on AND device is unlocked)
+ * Also monitors blocked apps (from FirebaseManager.blockedApps) and triggers
+ * overlay when a blocked app becomes the foreground app.
  */
 class SensorService : Service() {
 
@@ -51,14 +50,21 @@ class SensorService : Service() {
 
         // How often to poll UsageStats for foreground app (seconds)
         private const val POLL_INTERVAL_S = 3L
+
+        // How often to report battery level (seconds) — less frequent than app polling
+        private const val BATTERY_INTERVAL_S = 60L
     }
 
     private var screenReceiver: ScreenReceiver? = null
     private var isScreenOn: Boolean = false
     private var isDeviceLocked: Boolean = true
     private var lastForegroundApp: String = ""
+    private var lastBatteryLevel: Int? = null
     private var scheduler: ScheduledExecutorService? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // Blocked apps tracking (Phase 2)
+    private var isShowingBlockOverlay: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -106,6 +112,9 @@ class SensorService : Service() {
         // Connect to Firebase (no IP address needed!)
         FirebaseManager.connect()
 
+        // Register Firebase command callbacks
+        registerFirebaseCallbacks()
+
         // ── Detect initial screen state (REAL, not static) ──
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         isScreenOn = powerManager.isInteractive
@@ -120,6 +129,10 @@ class SensorService : Service() {
             isDeviceLocked = keyguardManager.isDeviceLocked
             Log.i(TAG, "Initial lock state: isDeviceLocked=$isDeviceLocked (KeyguardManager.isDeviceLocked)")
         }
+
+        // ── Read initial battery level ──
+        lastBatteryLevel = getBatteryLevel()
+        Log.i(TAG, "Initial battery level: $lastBatteryLevel%")
 
         // Register screen on/off + USER_PRESENT receiver
         registerScreenReceiver()
@@ -159,6 +172,46 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
+    //  Firebase Command Callbacks (Phase 2)
+    // ═══════════════════════════════════════════════════════════════════
+
+    private fun registerFirebaseCallbacks() {
+        // INTERVENE — show notification + optional overlay
+        FirebaseManager.onIntervene = { message ->
+            Log.w(TAG, "INTERVENE callback: $message")
+            // The DashboardScreen/ChatScreen handles notification display
+            // via FirebaseManager.messages StateFlow
+        }
+
+        // BLOCK_APPS — start overlay for blocked apps
+        FirebaseManager.onBlockApps = { apps, message ->
+            Log.w(TAG, "BLOCK_APPS callback: apps=$apps message=$message")
+            // Check immediately if current foreground app is blocked
+            checkAndBlockForegroundApp()
+        }
+
+        // UNBLOCK_APPS — remove overlay
+        FirebaseManager.onUnblockApps = { message ->
+            Log.i(TAG, "UNBLOCK_APPS callback: $message")
+            isShowingBlockOverlay = false
+            stopOverlayService()
+        }
+
+        // LOCK_SCREEN — show lock-style overlay
+        FirebaseManager.onLockScreen = { message ->
+            Log.w(TAG, "LOCK_SCREEN callback: $message")
+            startOverlayService("LOCK", message)
+        }
+
+        // CLEAR — remove all overlays
+        FirebaseManager.onClear = {
+            Log.i(TAG, "CLEAR callback")
+            isShowingBlockOverlay = false
+            stopOverlayService()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
     //  Screen State + Lock Detection (REAL values)
     // ═══════════════════════════════════════════════════════════════════
 
@@ -169,6 +222,7 @@ class SensorService : Service() {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_USER_PRESENT)  // User unlocked the device
+            addAction(Intent.ACTION_BATTERY_CHANGED) // Battery level changes
         }
 
         registerReceiver(screenReceiver, filter)
@@ -187,6 +241,11 @@ class SensorService : Service() {
             // Send update if anything changed
             if (screenChanged || lockChanged) {
                 sendCurrentState()
+            }
+
+            // If screen turned on and unlocked, check for blocked apps
+            if (screenOn && !deviceLocked) {
+                checkAndBlockForegroundApp()
             }
         }
     }
@@ -249,11 +308,29 @@ class SensorService : Service() {
                     lastForegroundApp = currentApp
                     Log.d(TAG, "Foreground app changed: $currentApp")
                     sendCurrentState()
+
+                    // Phase 2: Check if current app is blocked
+                    checkAndBlockForegroundApp()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "App polling error: ${e.message}")
             }
         }, POLL_INTERVAL_S, POLL_INTERVAL_S, TimeUnit.SECONDS)
+
+        // Battery level polling (less frequent)
+        scheduler?.scheduleAtFixedRate({
+            try {
+                val currentLevel = getBatteryLevel()
+                if (currentLevel != null && currentLevel != lastBatteryLevel) {
+                    lastBatteryLevel = currentLevel
+                    Log.d(TAG, "Battery level changed: $currentLevel%")
+                    // Send state update with new battery info
+                    // (only if something else also changed, to avoid excessive Firebase writes)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Battery polling error: ${e.message}")
+            }
+        }, BATTERY_INTERVAL_S, BATTERY_INTERVAL_S, TimeUnit.SECONDS)
     }
 
     /**
@@ -283,7 +360,88 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Send State to Orchestrator via Firebase
+    //  Battery Level (Phase 3)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Get current battery level as a percentage (0-100).
+     * Uses BatteryManager which doesn't require a sticky broadcast.
+     */
+    private fun getBatteryLevel(): Int? {
+        return try {
+            val batteryManager = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            batteryManager?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read battery level: ${e.message}")
+            null
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Blocked Apps Detection (Phase 2)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Check if the current foreground app is in the blocked apps list.
+     * If so, start the overlay service to block it.
+     */
+    private fun checkAndBlockForegroundApp() {
+        val blocked = FirebaseManager.blockedApps.value
+        if (blocked.isEmpty()) {
+            if (isShowingBlockOverlay) {
+                isShowingBlockOverlay = false
+                stopOverlayService()
+            }
+            return
+        }
+
+        val currentApp = lastForegroundApp
+        if (currentApp.isEmpty()) return
+
+        // Check if current app matches any blocked app (exact or friendly name match)
+        val isBlocked = blocked.any { blockedApp ->
+            currentApp.equals(blockedApp, ignoreCase = true) ||
+            FirebaseManager.getFriendlyAppName(currentApp).equals(blockedApp, ignoreCase = true) ||
+            currentApp.contains(blockedApp, ignoreCase = true)
+        }
+
+        if (isBlocked && !isShowingBlockOverlay) {
+            val appName = FirebaseManager.getFriendlyAppName(currentApp)
+            Log.w(TAG, "BLOCKED app detected: $appName — showing overlay")
+            isShowingBlockOverlay = true
+            startOverlayService("BLOCK", "Aplikace $appName je zablokována. Vrať se k práci!")
+        } else if (!isBlocked && isShowingBlockOverlay) {
+            Log.i(TAG, "App is no longer blocked — removing overlay")
+            isShowingBlockOverlay = false
+            stopOverlayService()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Overlay Service Control (Phase 2)
+    // ═══════════════════════════════════════════════════════════════════
+
+    private fun startOverlayService(type: String, message: String) {
+        val intent = Intent(this, cz.julek.rails.overlay.OverlayService::class.java).apply {
+            action = when (type) {
+                "BLOCK" -> cz.julek.rails.overlay.OverlayService.ACTION_INTERVENE
+                "LOCK" -> cz.julek.rails.overlay.OverlayService.ACTION_LOCK_SCREEN
+                else -> cz.julek.rails.overlay.OverlayService.ACTION_INTERVENE
+            }
+            putExtra(cz.julek.rails.overlay.OverlayService.EXTRA_MESSAGE, message)
+        }
+        startService(intent)
+    }
+
+    private fun stopOverlayService() {
+        val intent = Intent(this, cz.julek.rails.overlay.OverlayService::class.java).apply {
+            action = cz.julek.rails.overlay.OverlayService.ACTION_CLEAR
+        }
+        startService(intent)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Send State to Orchestrator via Firebase (Phase 3 — extended)
     // ═══════════════════════════════════════════════════════════════════
 
     /**
@@ -293,7 +451,8 @@ class SensorService : Service() {
      * to ensure we never send stale/incorrect data.
      *
      * Firebase path: /rails/devices/my_phone/phone_state
-     * Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false, "timestamp": ... }
+     * Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false,
+     *            "timestamp": ..., "battery_level": 85 }
      */
     private fun sendCurrentState() {
         // Refresh screen state from PowerManager (ensure REAL value)
@@ -310,14 +469,16 @@ class SensorService : Service() {
         // If screen is off, device is implicitly locked
         val effectiveLocked = isDeviceLocked || !isScreenOn
 
-        // Send via Firebase
+        // Send via Firebase (with Phase 3 battery level)
         FirebaseManager.sendState(
             screenOn = isScreenOn,
             foregroundApp = app,
-            deviceLocked = effectiveLocked
+            deviceLocked = effectiveLocked,
+            batteryLevel = lastBatteryLevel,
         )
 
-        Log.d(TAG, "State sent: screen_on=$isScreenOn, device_locked=$effectiveLocked, app=$app")
+        Log.d(TAG, "State sent: screen_on=$isScreenOn, device_locked=$effectiveLocked, " +
+                "app=$app, battery=$lastBatteryLevel%")
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -330,7 +491,7 @@ class SensorService : Service() {
             "Rails Sensor",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Senzor sledování aktivity na pozadí"
+            description = "Senzor sledovani aktivity na pozadi"
             setShowBadge(false)
         }
         val manager = getSystemService(NotificationManager::class.java)
@@ -339,8 +500,8 @@ class SensorService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Rails senzor aktivní")
-            .setContentText("Sleduji aktivitu a odesílám data přes Firebase")
+            .setContentTitle("Rails senzor aktivni")
+            .setContentText("Sleduji aktivitu a odesilam data pres Firebase")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
             .setSilent(true)
