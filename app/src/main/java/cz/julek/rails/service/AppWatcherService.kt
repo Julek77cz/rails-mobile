@@ -14,20 +14,24 @@ import cz.julek.rails.network.FirebaseManager
  * or switches to any app. If the app is in the blocked list, the user
  * is immediately kicked to the home screen.
  *
- * This is how AppBlock, Forest, and similar apps work — event-driven,
- * not polling-based. Zero delay between app open and block action.
- *
- * Must be enabled manually: Settings > Accessibility > Rails Blokování
- * The onboarding flow guides the user through this.
+ * Uses a timestamp-based cooldown instead of "lastKickedPackage" flag:
+ *   - After kicking, we ignore the SAME package for 500ms (transition animation)
+ *   - After 500ms, if the user reopens the blocked app, we kick again
+ *   - This fixes the bug where reopening a blocked app was silently allowed
  */
 class AppWatcherService : AccessibilityService() {
 
     companion object {
         private const val TAG = "Rails/AppWatcher"
 
-        // Track the last package we kicked to home, to avoid re-kicking
-        // (the HOME intent itself causes a WINDOW_STATE_CHANGED for the launcher)
+        // Cooldown in ms — ignore same package for this long after kicking.
+        // This prevents re-kicking during the app→home transition animation.
+        // 500ms is enough for the animation but short enough that a user
+        // reopening the app will get kicked again.
+        private const val KICK_COOLDOWN_MS = 500L
+
         private var lastKickedPackage: String = ""
+        private var lastKickedTime: Long = 0L
 
         private var _isRunning: Boolean = false
         val isRunning: Boolean get() = _isRunning
@@ -58,14 +62,8 @@ class AppWatcherService : AccessibilityService() {
         // Skip our own app
         if (packageName.startsWith("cz.julek.rails")) return
 
-        // Skip launcher / system UI (result of our own HOME intent)
-        if (isLauncher(packageName)) {
-            lastKickedPackage = ""
-            return
-        }
-
-        // Skip if this is the same package we just kicked
-        if (packageName == lastKickedPackage) return
+        // Skip launcher / system UI — these are never blocked
+        if (isLauncher(packageName)) return
 
         // Check if this app is blocked
         val blocked = FirebaseManager.blockedApps.value
@@ -78,10 +76,21 @@ class AppWatcherService : AccessibilityService() {
         }
 
         if (isBlocked) {
+            val now = System.currentTimeMillis()
+            val timeSinceLastKick = now - lastKickedTime
+
+            // If we just kicked THIS SAME package within the cooldown window,
+            // skip — this is just a transition animation event, not a real reopen
+            if (packageName == lastKickedPackage && timeSinceLastKick < KICK_COOLDOWN_MS) {
+                Log.d(TAG, "Skipping $packageName — cooldown (${timeSinceLastKick}ms ago)")
+                return
+            }
+
             val appName = FirebaseManager.getFriendlyAppName(packageName)
-            Log.w(TAG, "BLOCKED: $appName opened — kicking to home IMMEDIATELY")
+            Log.w(TAG, "BLOCKED: $appName opened — kicking to home (${timeSinceLastKick}ms since last kick)")
 
             lastKickedPackage = packageName
+            lastKickedTime = now
             goToHomeScreen()
             notifyBlocked(appName)
         }
