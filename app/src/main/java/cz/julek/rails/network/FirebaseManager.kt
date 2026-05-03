@@ -459,8 +459,10 @@ object FirebaseManager {
             timestamp = System.currentTimeMillis()
         )
         _messages.value = _messages.value + msg
-        // Persist to Firebase chat history
-        saveChatMessageToHistory(msg)
+        // NOTE: Do NOT save to chat_history here — Node.js orchestrator already
+        // persists user messages to chat_history. Dual-writing caused duplicates
+        // because Android uses System.currentTimeMillis() while Node.js uses
+        // ServerValue.TIMESTAMP, so dedup by timestamp failed.
     }
 
     private fun addOrchestratorMessage(text: String) {
@@ -471,8 +473,8 @@ object FirebaseManager {
             timestamp = System.currentTimeMillis()
         )
         _messages.value = _messages.value + msg
-        // Persist to Firebase chat history
-        saveChatMessageToHistory(msg)
+        // NOTE: Do NOT save to chat_history here — Node.js orchestrator already
+        // persists AI responses to chat_history. Dual-writing caused duplicates.
     }
 
     private fun addSystemMessage(text: String) {
@@ -519,27 +521,30 @@ object FirebaseManager {
 
     /**
      * Load chat history from Firebase on connect.
-     * Reads the last N messages from /rails/devices/my_phone/chat_history
-     * Deduplicates by (timestamp + role + text) to avoid showing the same
-     * message twice (both Android and Node.js write to chat_history).
+     * Reads the last N messages from /rails/devices/my_phone/chat_history.
+     * Deduplicates by (role + text_prefix) to handle cases where the same
+     * logical message was written by both Android and Node.js (legacy).
+     * Merges with any real-time messages that arrived during the async load
+     * to prevent data loss.
      */
     fun loadChatHistory() {
         val ref = deviceRef ?: return
-        ref.child("chat_history").orderByChild("timestamp").limitToLast(50).get()
+        ref.child("chat_history").orderByChild("timestamp").limitToLast(100).get()
             .addOnSuccessListener { snapshot ->
                 if (!snapshot.exists()) return@addOnSuccessListener
 
                 val historyMessages = mutableListOf<ChatMessage>()
-                val seen = mutableSetOf<String>()  // dedup key: "timestamp|role|text"
+                val seen = mutableSetOf<String>()  // dedup key: "role|text_prefix"
 
                 for (child in snapshot.children) {
                     val roleStr = child.child("role").getValue(String::class.java) ?: continue
                     val text = child.child("text").getValue(String::class.java) ?: continue
                     val timestamp = child.child("timestamp").getValue(Long::class.java) ?: continue
 
-                    // Dedup key — same message from Android + Node.js would have same timestamp
-                    val dedupKey = "$timestamp|$roleStr|${text.substring(0, minOf(40, text.length))}"
-                    if (!seen.add(dedupKey)) continue  // already seen, skip
+                    // Dedup by role + text prefix (NOT timestamp — Android and Node.js
+                    // use different clock sources, so timestamps differ for the same message)
+                    val dedupKey = "$roleStr|${text.substring(0, minOf(60, text.length))}"
+                    if (!seen.add(dedupKey)) continue  // already seen, skip duplicate
 
                     val role = when (roleStr) {
                         "user" -> MessageRole.USER
@@ -555,8 +560,12 @@ object FirebaseManager {
                 }
 
                 if (historyMessages.isNotEmpty()) {
-                    _messages.value = historyMessages.sortedBy { it.timestamp }
-                    Log.i(TAG, "Chat history loaded: ${historyMessages.size} messages")
+                    // Merge: keep any real-time messages that arrived during the async load
+                    val currentRealtime = _messages.value.filter { it.role == MessageRole.SYSTEM }
+                    val merged = (historyMessages + currentRealtime).sortedBy { it.timestamp }
+                    _messages.value = merged
+                    Log.i(TAG, "Chat history loaded: ${historyMessages.size} messages from Firebase, " +
+                            "${currentRealtime.size} real-time system messages preserved")
                 }
             }
             .addOnFailureListener { e ->
