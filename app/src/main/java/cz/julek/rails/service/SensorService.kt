@@ -47,7 +47,9 @@ class SensorService : Service() {
         const val CHANNEL_ID = "rails_sensor"
         const val CHANNEL_ID_ALERTS = "rails_alerts"  // High-priority for interventions
         const val CHANNEL_ID_CHAT = "rails_chat"    // Chat messages from AI
+        const val CHANNEL_ID_BLOCK = "rails_block"  // App blocking notifications
         const val NOTIFICATION_ID = 1001
+        const val BLOCK_NOTIFICATION_ID = 3001
 
         const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
         const val ACTION_STOP = "cz.julek.rails.action.STOP_SENSOR"
@@ -106,6 +108,7 @@ class SensorService : Service() {
         createNotificationChannel()
         createAlertNotificationChannel()
         createChatNotificationChannel()
+        createBlockNotificationChannel()
 
         // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -204,11 +207,12 @@ class SensorService : Service() {
             checkAndBlockForegroundApp()
         }
 
-        // UNBLOCK_APPS — remove overlay
+        // UNBLOCK_APPS — remove overlay + cancel block notification
         FirebaseManager.onUnblockApps = { message ->
             Log.i(TAG, "UNBLOCK_APPS callback: $message")
             isShowingBlockOverlay = false
             stopOverlayService()
+            cancelBlockNotification()
         }
 
         // LOCK_SCREEN — show lock-style overlay
@@ -217,11 +221,12 @@ class SensorService : Service() {
             startOverlayService("LOCK", message)
         }
 
-        // CLEAR — remove all overlays
+        // CLEAR — remove all overlays + notifications
         FirebaseManager.onClear = {
             Log.i(TAG, "CLEAR callback")
             isShowingBlockOverlay = false
             stopOverlayService()
+            cancelBlockNotification()
         }
     }
 
@@ -392,12 +397,14 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Blocked Apps Detection (Phase 2)
+    //  Blocked Apps Detection (Phase 2 — Home Screen Kick)
     // ═══════════════════════════════════════════════════════════════════
 
     /**
      * Check if the current foreground app is in the blocked apps list.
-     * If so, start the overlay service to block it.
+     * If so, kick the user to the home screen and show a notification.
+     * This is cleaner than an overlay — it looks like the system itself
+     * prevented the app from opening, similar to AppBlock/Forest.
      */
     private fun checkAndBlockForegroundApp() {
         val blocked = FirebaseManager.blockedApps.value
@@ -421,14 +428,33 @@ class SensorService : Service() {
 
         if (isBlocked && !isShowingBlockOverlay) {
             val appName = FirebaseManager.getFriendlyAppName(currentApp)
-            Log.w(TAG, "BLOCKED app detected: $appName — showing overlay")
+            Log.w(TAG, "BLOCKED app detected: $appName — kicking to home screen")
             isShowingBlockOverlay = true
-            startOverlayService("BLOCK", "Aplikace $appName je zablokována. Vrať se k práci!")
+
+            // Kick user to home screen — clean, looks like system-level blocking
+            goToHomeScreen()
+
+            // Show a notification explaining what happened
+            showBlockNotification(appName)
         } else if (!isBlocked && isShowingBlockOverlay) {
-            Log.i(TAG, "App is no longer blocked — removing overlay")
+            Log.i(TAG, "App is no longer blocked — removing notification")
             isShowingBlockOverlay = false
-            stopOverlayService()
+            cancelBlockNotification()
         }
+    }
+
+    /**
+     * Navigate to the home screen (launcher).
+     * This "minimizes" the blocked app and sends the user back
+     * to the home screen, like AppBlock or Forest do.
+     */
+    private fun goToHomeScreen() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        startActivity(homeIntent)
+        Log.i(TAG, "Kicked user to home screen")
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -629,6 +655,69 @@ class SensorService : Service() {
         notificationManager.notify(notificationId, notification)
 
         Log.i(TAG, "Chat notification shown: ${text.substring(0, minOf(60, text.length))}")
+    }
+
+    /**
+     * Notification channel for app blocking — shown when a blocked app
+     * is detected and user is kicked to home screen.
+     * Uses IMPORTANCE_DEFAULT so it doesn't make noise every time
+     * (user gets kicked to home, notification is just the explanation).
+     */
+    private fun createBlockNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID_BLOCK,
+            "Rails Blokování",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Upozornění při zablokování aplikace"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 100)
+            enableLights(true)
+            lightColor = 0xFFD32F2F.toInt()  // Red
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    /**
+     * Show an ongoing notification when a blocked app is detected.
+     * Stays visible until the app is unblocked — reminds the user
+     * why they were kicked to the home screen.
+     */
+    private fun showBlockNotification(appName: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 2, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID_BLOCK)
+            .setContentTitle("$appName je zablokována")
+            .setContentText("Vrať se k práci! Aplikace bude odblokována automaticky.")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setOngoing(true)  // Cannot be swiped away — stays until unblocked
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(BLOCK_NOTIFICATION_ID, notification)
+
+        Log.i(TAG, "Block notification shown for: $appName")
+    }
+
+    /**
+     * Cancel the block notification when apps are unblocked.
+     */
+    private fun cancelBlockNotification() {
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.cancel(BLOCK_NOTIFICATION_ID)
+        Log.i(TAG, "Block notification cancelled")
     }
 
     private fun buildNotification(): Notification {
