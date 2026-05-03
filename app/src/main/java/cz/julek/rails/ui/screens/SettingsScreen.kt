@@ -1,7 +1,9 @@
 package cz.julek.rails.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -10,6 +12,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -18,13 +23,9 @@ import cz.julek.rails.network.ConnectionState
 import cz.julek.rails.network.FirebaseManager
 
 /**
- * Settings Screen — App configuration and preferences.
+ * Settings Screen — App configuration, connection status, and info.
  *
- * Contains:
- * - Connection management (connect/disconnect)
- * - Permission status overview
- * - Notification preferences
- * - About section
+ * Modern minimalist design with gradient accents and clean card layout.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -38,17 +39,17 @@ fun SettingsScreen() {
             .fillMaxSize()
             .verticalScroll(scrollState)
             .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // ── Connection ──
         SectionHeader("Připojení")
 
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
                 containerColor = if (isConnected)
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
                 else
                     MaterialTheme.colorScheme.surfaceContainer
             )
@@ -64,13 +65,28 @@ fun SettingsScreen() {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Icon(
-                        imageVector = if (isConnected) Icons.Outlined.CloudDone else Icons.Outlined.CloudOff,
-                        contentDescription = null,
-                        tint = if (isConnected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.size(24.dp)
-                    )
+                    // Gradient icon
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    colors = if (isConnected)
+                                        listOf(Color(0xFF2E7D32), Color(0xFF66BB6A))
+                                    else
+                                        listOf(Color(0xFF9E9E9E), Color(0xFFBDBDBD))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = if (isConnected) Icons.Outlined.CloudDone else Icons.Outlined.CloudOff,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                     Column {
                         Text(
                             if (isConnected) "Připojeno" else "Odpojeno",
@@ -85,26 +101,75 @@ fun SettingsScreen() {
                     }
                 }
 
-                // Quick toggle
-                Switch(
-                    checked = isConnected,
-                    onCheckedChange = { /* Handled by Dashboard connect button */ },
-                    colors = SwitchDefaults.colors(
-                        checkedTrackColor = MaterialTheme.colorScheme.primary,
-                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary
-                    )
+                // Status indicator dot
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isConnected) Color(0xFF4CAF50)
+                            else Color(0xFFBDBDBD)
+                        )
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(2.dp))
+
+        // ── Features ──
+        SectionHeader("Funkce")
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer
+            )
+        ) {
+            Column {
+                ModernSettingsRow(
+                    icon = Icons.Outlined.Psychology,
+                    title = "AI Hlídání",
+                    subtitle = "Inteligentní detekce prokrastinace"
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 56.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                )
+                ModernSettingsRow(
+                    icon = Icons.Outlined.NotificationsActive,
+                    title = "Notifikace",
+                    subtitle = "Zvuk a vibrace při intervenci"
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 56.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                )
+                ModernSettingsRow(
+                    icon = Icons.Outlined.Block,
+                    title = "Blokování aplikací",
+                    subtitle = "Automatické blokování rozptylovačů"
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 56.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                )
+                ModernSettingsRow(
+                    icon = Icons.Outlined.ChatBubbleOutline,
+                    title = "AI Chat",
+                    subtitle = "Asistent vždy po ruce"
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(2.dp))
 
         // ── About ──
         SectionHeader("O aplikaci")
 
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainer
             )
@@ -114,54 +179,70 @@ fun SettingsScreen() {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Icon(
-                        Icons.Outlined.Psychology,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Text(
-                        "Rails — AI Focus Monitor",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 15.sp
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(
+                                Brush.linearGradient(
+                                    colors = listOf(
+                                        MaterialTheme.colorScheme.primary,
+                                        MaterialTheme.colorScheme.tertiary
+                                    )
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Outlined.AutoAwesome,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            "Rails — AI Focus Monitor",
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        )
+                        Text(
+                            "v2.2.0 — Firebase Edition",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     "Monitoruje tvoji produktivitu pomocí AI a pomáhá ti zůstat soustředěný. " +
                     "Sleduje aktivitu na PC i mobilu a reaguje na prokrastinaci.",
                     fontSize = 13.sp,
-                    lineHeight = 18.sp,
+                    lineHeight = 19.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "v2.1.0 — Firebase Edition",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.outline
                 )
             }
         }
 
-        // ── Links ──
+        // ── Privacy & Links ──
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainer
             )
         ) {
             Column {
-                SettingsRow(
+                ModernSettingsRow(
                     icon = Icons.Outlined.PrivacyTip,
                     title = "Soukromí",
                     subtitle = "Všechna data zůstávají na tvém PC a Firebase"
                 )
                 HorizontalDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                    modifier = Modifier.padding(horizontal = 56.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
                 )
-                SettingsRow(
+                ModernSettingsRow(
                     icon = Icons.Outlined.Code,
                     title = "Open Source",
                     subtitle = "github.com/Julek77cz/rails"
@@ -170,6 +251,10 @@ fun SettingsScreen() {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Reusable Components
+// ═══════════════════════════════════════════════════════════════════════
 
 @Composable
 private fun SectionHeader(text: String) {
@@ -183,7 +268,7 @@ private fun SectionHeader(text: String) {
 }
 
 @Composable
-private fun SettingsRow(
+private fun ModernSettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String

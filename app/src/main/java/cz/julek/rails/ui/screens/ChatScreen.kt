@@ -1,7 +1,9 @@
 package cz.julek.rails.ui.screens
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,11 +12,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -29,9 +34,10 @@ import kotlinx.coroutines.launch
  *
  * Modern minimalist design with:
  * - Focus score indicator in the top bar
- * - Clean message bubbles with role avatars
+ * - Clean message bubbles with role-based styling
  * - Typing indicator when AI is processing
  * - Auto-scroll on new messages
+ * - Gradient accents for AI messages
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,10 +61,14 @@ fun ChatScreen() {
         modifier = Modifier.fillMaxSize()
     ) {
         // ── Connection status strip ──
-        if (!isConnected) {
+        AnimatedVisibility(
+            visible = !isConnected,
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
             ) {
                 Text(
                     "Nejste připojeni — přejděte do Status pro připojení",
@@ -77,36 +87,55 @@ fun ChatScreen() {
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            // Empty state
+            // Empty state — welcoming hero
             if (messages.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(top = 100.dp),
+                            .padding(top = 80.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                "👋",
-                                fontSize = 40.sp
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
+                            // Gradient icon background
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(
+                                            colors = listOf(
+                                                MaterialTheme.colorScheme.primary,
+                                                MaterialTheme.colorScheme.tertiary
+                                            )
+                                        )
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Filled.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(20.dp))
                             Text(
                                 "Ahoj, já jsem Rails",
-                                fontSize = 20.sp,
+                                fontSize = 22.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
                                 "Tvůj AI parťák pro produktivitu.\nNapiš mi cokoliv a poradím ti.",
                                 fontSize = 14.sp,
                                 color = MaterialTheme.colorScheme.outline,
-                                lineHeight = 20.sp
+                                lineHeight = 22.sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
                             )
                         }
                     }
@@ -122,13 +151,14 @@ fun ChatScreen() {
         // ── Input Bar ──
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shadowElevation = 4.dp,
-            color = MaterialTheme.colorScheme.surface
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .imePadding(),
                 verticalAlignment = Alignment.Bottom,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -145,12 +175,15 @@ fun ChatScreen() {
                     enabled = isConnected,
                     singleLine = false,
                     maxLines = 4,
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(24.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-                        disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.15f),
+                        disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.5f),
+                        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.2f),
                     ),
                     textStyle = LocalTextStyle.current.copy(
                         fontSize = 14.sp,
@@ -167,17 +200,17 @@ fun ChatScreen() {
                         }
                     },
                     enabled = isConnected && inputText.trim().isNotEmpty(),
-                    modifier = Modifier.size(44.dp),
+                    modifier = Modifier.size(46.dp),
                     shape = CircleShape,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                     )
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Odeslat",
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(20.dp),
                         tint = if (isConnected && inputText.trim().isNotEmpty())
                             MaterialTheme.colorScheme.onPrimary
                         else
@@ -190,28 +223,35 @@ fun ChatScreen() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Chat Message Bubble — Modern minimal design
+//  Chat Message Bubble — Modern minimal design with gradient accents
 // ═══════════════════════════════════════════════════════════════════════
 
 @Composable
 fun MessageBubble(message: ChatMessage) {
     val isUser = message.role == MessageRole.USER
     val isSystem = message.role == MessageRole.SYSTEM
+    val isOrchestrator = message.role == MessageRole.ORCHESTRATOR
 
     // System messages — centered, subtle
     if (isSystem) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 4.dp),
+                .padding(vertical = 6.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                message.text,
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.outline,
-                fontWeight = FontWeight.Medium
-            )
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.7f),
+            ) {
+                Text(
+                    message.text,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.outline,
+                    fontWeight = FontWeight.Medium
+                )
+            }
         }
         return
     }
@@ -222,10 +262,10 @@ fun MessageBubble(message: ChatMessage) {
     ) {
         Card(
             shape = RoundedCornerShape(
-                topStart = 18.dp,
-                topEnd = 18.dp,
-                bottomStart = if (isUser) 18.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 18.dp
+                topStart = 20.dp,
+                topEnd = 20.dp,
+                bottomStart = if (isUser) 20.dp else 4.dp,
+                bottomEnd = if (isUser) 4.dp else 20.dp
             ),
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser)
@@ -233,9 +273,31 @@ fun MessageBubble(message: ChatMessage) {
                 else
                     MaterialTheme.colorScheme.surfaceContainerHigh
             ),
-            modifier = Modifier.widthIn(max = 300.dp)
+            modifier = Modifier.widthIn(max = 310.dp)
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                // AI label for orchestrator messages
+                if (isOrchestrator) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(12.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        )
+                        Text(
+                            "Rails",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
                 // Message text
                 Text(
                     text = message.text,
@@ -252,9 +314,9 @@ fun MessageBubble(message: ChatMessage) {
                     text = message.timestampText,
                     fontSize = 10.sp,
                     color = if (isUser)
-                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.5f)
+                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.45f)
                     else
-                        MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
                 )
             }
         }
