@@ -69,8 +69,8 @@ class SensorService : Service() {
     private var scheduler: ScheduledExecutorService? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // Blocked apps tracking (Phase 2)
-    private var isShowingBlockOverlay: Boolean = false
+    // Block notification tracking (AppWatcherService handles the actual kicking)
+    private var isBlockNotificationShown: Boolean = false
 
     override fun onCreate() {
         super.onCreate()
@@ -200,18 +200,28 @@ class SensorService : Service() {
             showChatNotification(text)
         }
 
-        // BLOCK_APPS — start overlay for blocked apps
+        // BLOCK_APPS — show notification (AppWatcherService handles kicking)
         FirebaseManager.onBlockApps = { apps, message ->
             Log.w(TAG, "BLOCK_APPS callback: apps=$apps message=$message")
-            // Check immediately if current foreground app is blocked
-            checkAndBlockForegroundApp()
+            // Show a block notification immediately
+            val currentApp = lastForegroundApp
+            if (currentApp.isNotEmpty()) {
+                val isBlocked = apps.any { blockedApp ->
+                    currentApp.equals(blockedApp, ignoreCase = true) ||
+                    FirebaseManager.getFriendlyAppName(currentApp).equals(blockedApp, ignoreCase = true) ||
+                    currentApp.contains(blockedApp, ignoreCase = true)
+                }
+                if (isBlocked) {
+                    showBlockNotification(FirebaseManager.getFriendlyAppName(currentApp))
+                    isBlockNotificationShown = true
+                }
+            }
         }
 
-        // UNBLOCK_APPS — remove overlay + cancel block notification
+        // UNBLOCK_APPS — cancel block notification
         FirebaseManager.onUnblockApps = { message ->
             Log.i(TAG, "UNBLOCK_APPS callback: $message")
-            isShowingBlockOverlay = false
-            stopOverlayService()
+            isBlockNotificationShown = false
             cancelBlockNotification()
         }
 
@@ -224,8 +234,7 @@ class SensorService : Service() {
         // CLEAR — remove all overlays + notifications
         FirebaseManager.onClear = {
             Log.i(TAG, "CLEAR callback")
-            isShowingBlockOverlay = false
-            stopOverlayService()
+            isBlockNotificationShown = false
             cancelBlockNotification()
         }
     }
@@ -262,10 +271,8 @@ class SensorService : Service() {
                 sendCurrentState()
             }
 
-            // If screen turned on and unlocked, check for blocked apps
-            if (screenOn && !deviceLocked) {
-                checkAndBlockForegroundApp()
-            }
+            // If screen turned on and unlocked, AppWatcherService will
+            // handle blocking automatically via Accessibility events
         }
     }
 
@@ -328,8 +335,8 @@ class SensorService : Service() {
                     Log.d(TAG, "Foreground app changed: $currentApp")
                     sendCurrentState()
 
-                    // Phase 2: Check if current app is blocked
-                    checkAndBlockForegroundApp()
+                    // Blocking is handled by AppWatcherService (AccessibilityService)
+                    // which detects app switches instantly — no polling needed
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "App polling error: ${e.message}")
@@ -397,65 +404,12 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Blocked Apps Detection (Phase 2 — Home Screen Kick)
+    //  Blocked Apps — Notification only (kicking handled by AppWatcherService)
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * Check if the current foreground app is in the blocked apps list.
-     * If so, kick the user to the home screen and show a notification.
-     * This is cleaner than an overlay — it looks like the system itself
-     * prevented the app from opening, similar to AppBlock/Forest.
-     */
-    private fun checkAndBlockForegroundApp() {
-        val blocked = FirebaseManager.blockedApps.value
-        if (blocked.isEmpty()) {
-            if (isShowingBlockOverlay) {
-                isShowingBlockOverlay = false
-                stopOverlayService()
-            }
-            return
-        }
-
-        val currentApp = lastForegroundApp
-        if (currentApp.isEmpty()) return
-
-        // Check if current app matches any blocked app (exact or friendly name match)
-        val isBlocked = blocked.any { blockedApp ->
-            currentApp.equals(blockedApp, ignoreCase = true) ||
-            FirebaseManager.getFriendlyAppName(currentApp).equals(blockedApp, ignoreCase = true) ||
-            currentApp.contains(blockedApp, ignoreCase = true)
-        }
-
-        if (isBlocked && !isShowingBlockOverlay) {
-            val appName = FirebaseManager.getFriendlyAppName(currentApp)
-            Log.w(TAG, "BLOCKED app detected: $appName — kicking to home screen")
-            isShowingBlockOverlay = true
-
-            // Kick user to home screen — clean, looks like system-level blocking
-            goToHomeScreen()
-
-            // Show a notification explaining what happened
-            showBlockNotification(appName)
-        } else if (!isBlocked && isShowingBlockOverlay) {
-            Log.i(TAG, "App is no longer blocked — removing notification")
-            isShowingBlockOverlay = false
-            cancelBlockNotification()
-        }
-    }
-
-    /**
-     * Navigate to the home screen (launcher).
-     * This "minimizes" the blocked app and sends the user back
-     * to the home screen, like AppBlock or Forest do.
-     */
-    private fun goToHomeScreen() {
-        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-            addCategory(Intent.CATEGORY_HOME)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-        }
-        startActivity(homeIntent)
-        Log.i(TAG, "Kicked user to home screen")
-    }
+    // Note: The actual home-screen kick is done by AppWatcherService
+    // (AccessibilityService), which detects app switches instantly.
+    // SensorService only shows/cancels the block notification.
 
     // ═══════════════════════════════════════════════════════════════════
     //  Overlay Service Control (Phase 2)
