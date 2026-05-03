@@ -80,6 +80,20 @@ object FirebaseManager {
     private var lastChatOutboxTimestamp: Long = 0
     private var lastCommandTimestamp: Long = 0
 
+    // Dedup buffer: remember last N outbox message texts to prevent duplicates
+    // on orchestrator restart (Firebase re-sends the same value on reconnect)
+    private val recentOutboxTexts = ArrayDeque<String>(maxSize = 10)
+    private const val DEDUP_BUFFER_SIZE = 10
+
+    private fun isDuplicateOutbox(text: String): Boolean {
+        if (recentOutboxTexts.contains(text)) return true
+        recentOutboxTexts.addLast(text)
+        if (recentOutboxTexts.size > DEDUP_BUFFER_SIZE) {
+            recentOutboxTexts.removeFirst()
+        }
+        return false
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     //  Intervention Listeners (Phase 2 — expanded)
     // ═══════════════════════════════════════════════════════════════════
@@ -161,6 +175,8 @@ object FirebaseManager {
                         _connectionState.value = ConnectionState.CONNECTED
                         addSystemMessage("Připojeno k Firebase cloudu")
                         Log.i(TAG, "Firebase connected!")
+                        // Load chat history on first connect
+                        loadChatHistory()
                     } else {
                         if (_connectionState.value == ConnectionState.CONNECTED) {
                             Log.w(TAG, "Firebase disconnected — will auto-reconnect")
@@ -294,11 +310,17 @@ object FirebaseManager {
                 val timestamp = (data["timestamp"] as? Number)?.toLong() ?: 0L
 
                 // Skip already-processed messages (prevents re-processing on reconnect)
-                if (timestamp <= lastChatOutboxTimestamp && lastChatOutboxTimestamp > 0) return
-                lastChatOutboxTimestamp = timestamp
-
+                // Use BOTH timestamp check AND content dedup for robustness
                 if (text.isNotEmpty()) {
-                    addOrchestratorMessage(text)
+                    val isOldTimestamp = timestamp <= lastChatOutboxTimestamp && lastChatOutboxTimestamp > 0
+                    val isDuplicate = isDuplicateOutbox(text)
+
+                    if (!isOldTimestamp && !isDuplicate) {
+                        lastChatOutboxTimestamp = timestamp
+                        addOrchestratorMessage(text)
+                    } else {
+                        Log.d(TAG, "Skipping duplicate outbox message: ${text.substring(0, minOf(40, text.length))}")
+                    }
                 }
             }
 
@@ -432,6 +454,8 @@ object FirebaseManager {
             timestamp = System.currentTimeMillis()
         )
         _messages.value = _messages.value + msg
+        // Persist to Firebase chat history
+        saveChatMessageToHistory(msg)
     }
 
     private fun addOrchestratorMessage(text: String) {
@@ -442,6 +466,8 @@ object FirebaseManager {
             timestamp = System.currentTimeMillis()
         )
         _messages.value = _messages.value + msg
+        // Persist to Firebase chat history
+        saveChatMessageToHistory(msg)
     }
 
     private fun addSystemMessage(text: String) {
@@ -456,6 +482,73 @@ object FirebaseManager {
 
     fun clearMessages() {
         _messages.value = emptyList()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Chat History Persistence
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Save a chat message to Firebase chat_history for persistence.
+     * This allows messages to survive app restarts.
+     * Path: /rails/devices/my_phone/chat_history/{auto-id}
+     * Keeps last 50 messages (oldest auto-deleted by orchestrator or cleanup).
+     */
+    private fun saveChatMessageToHistory(msg: ChatMessage) {
+        val ref = deviceRef ?: return
+        val roleStr = when (msg.role) {
+            MessageRole.USER -> "user"
+            MessageRole.ORCHESTRATOR -> "orchestrator"
+            MessageRole.SYSTEM -> "system"
+        }
+        val entry = mapOf(
+            "role" to roleStr,
+            "text" to msg.text,
+            "timestamp" to msg.timestamp
+        )
+        ref.child("chat_history").push().setValue(entry)
+            .addOnFailureListener { e ->
+                Log.w(TAG, "Failed to save chat history: ${e.message}")
+            }
+    }
+
+    /**
+     * Load chat history from Firebase on connect.
+     * Reads the last N messages from /rails/devices/my_phone/chat_history
+     */
+    fun loadChatHistory() {
+        val ref = deviceRef ?: return
+        ref.child("chat_history").orderByChild("timestamp").limitToLast(50).get()
+            .addOnSuccessListener { snapshot ->
+                if (!snapshot.exists()) return@addOnSuccessListener
+
+                val historyMessages = mutableListOf<ChatMessage>()
+                for (child in snapshot.children) {
+                    val roleStr = child.child("role").getValue(String::class.java) ?: continue
+                    val text = child.child("text").getValue(String::class.java) ?: continue
+                    val timestamp = child.child("timestamp").getValue(Long::class.java) ?: continue
+
+                    val role = when (roleStr) {
+                        "user" -> MessageRole.USER
+                        "orchestrator" -> MessageRole.ORCHESTRATOR
+                        else -> MessageRole.SYSTEM
+                    }
+                    historyMessages.add(ChatMessage(
+                        id = messageIdCounter.incrementAndGet(),
+                        role = role,
+                        text = text,
+                        timestamp = timestamp
+                    ))
+                }
+
+                if (historyMessages.isNotEmpty()) {
+                    _messages.value = historyMessages.sortedBy { it.timestamp }
+                    Log.i(TAG, "Chat history loaded: ${historyMessages.size} messages")
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.w(TAG, "Failed to load chat history: ${e.message}")
+            }
     }
 }
 

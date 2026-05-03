@@ -3,6 +3,7 @@ package cz.julek.rails.service
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
@@ -16,6 +17,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import cz.julek.rails.MainActivity
 import cz.julek.rails.network.FirebaseManager
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -43,6 +45,7 @@ class SensorService : Service() {
     companion object {
         const val TAG = "Rails/Sensor"
         const val CHANNEL_ID = "rails_sensor"
+        const val CHANNEL_ID_ALERTS = "rails_alerts"  // High-priority for interventions
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
@@ -98,6 +101,10 @@ class SensorService : Service() {
     private fun startSensor() {
         Log.i(TAG, "Starting sensor service — connecting to Firebase")
 
+        // Create BOTH notification channels
+        createNotificationChannel()
+        createAlertNotificationChannel()
+
         // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -112,7 +119,7 @@ class SensorService : Service() {
         // Connect to Firebase (no IP address needed!)
         FirebaseManager.connect()
 
-        // Register Firebase command callbacks
+        // Register Firebase command callbacks (includes intervention notifications)
         registerFirebaseCallbacks()
 
         // ── Detect initial screen state (REAL, not static) ──
@@ -179,8 +186,7 @@ class SensorService : Service() {
         // INTERVENE — show notification + optional overlay
         FirebaseManager.onIntervene = { message ->
             Log.w(TAG, "INTERVENE callback: $message")
-            // The DashboardScreen/ChatScreen handles notification display
-            // via FirebaseManager.messages StateFlow
+            showInterventionNotification(message)
         }
 
         // BLOCK_APPS — start overlay for blocked apps
@@ -496,6 +502,58 @@ class SensorService : Service() {
         }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
+    }
+
+    /**
+     * High-priority notification channel for AI interventions.
+     * This channel WILL buzz, vibrate, and show as heads-up notification.
+     */
+    private fun createAlertNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID_ALERTS,
+            "Rails Intervence",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "AI varování a intervence při prokrastinaci"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 300, 100, 300)
+            enableLights(true)
+            lightColor = 0xFFFF6F00.toInt()  // Amber
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    /**
+     * Show a high-priority notification when the AI Judge intervenes.
+     * Uses the alerts channel which has sound + vibration.
+     */
+    private fun showInterventionNotification(message: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID_ALERTS)
+            .setContentTitle("Rails — Pozor!")
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(2001, notification)
+
+        Log.i(TAG, "Intervention notification shown: ${message.substring(0, minOf(60, message.length))}")
     }
 
     private fun buildNotification(): Notification {

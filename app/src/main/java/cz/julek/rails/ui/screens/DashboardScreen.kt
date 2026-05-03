@@ -8,6 +8,9 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -56,7 +59,19 @@ fun DashboardScreen() {
     var hasOverlay by remember { mutableStateOf(checkOverlayPermission(context)) }
     var hasNotifications by remember { mutableStateOf(checkNotificationPermission(context)) }
 
-    // Refresh permissions when composable enters composition
+    // Refresh permissions when composable enters composition AND on every resume
+    // (user returns from system settings where they granted a permission)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.addObserver(LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasUsageStats = checkUsageStatsPermission(context)
+                hasOverlay = checkOverlayPermission(context)
+                hasNotifications = checkNotificationPermission(context)
+            }
+        })
+    }
+    // Also check on first composition
     LaunchedEffect(Unit) {
         hasUsageStats = checkUsageStatsPermission(context)
         hasOverlay = checkOverlayPermission(context)

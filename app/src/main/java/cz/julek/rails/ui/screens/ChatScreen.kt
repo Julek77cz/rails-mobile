@@ -1,18 +1,20 @@
 package cz.julek.rails.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -23,21 +25,21 @@ import cz.julek.rails.network.MessageRole
 import kotlinx.coroutines.launch
 
 /**
- * Terminal / Chat Screen — primary communication interface with the Orchestrator AI.
+ * Chat Screen — primary communication interface with the AI Orchestrator.
  *
- * Displays a scrolling message log (LazyColumn) and an input bar
- * for sending text messages to the Orchestrator via Firebase.
- * The Orchestrator's responses appear in real-time.
+ * Modern minimalist design with:
+ * - Focus score indicator in the top bar
+ * - Clean message bubbles with role avatars
+ * - Typing indicator when AI is processing
+ * - Auto-scroll on new messages
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen() {
-    // ── Observe messages from FirebaseManager ──
     val messages by FirebaseManager.messages.collectAsState()
     val connectionState by FirebaseManager.connectionState.collectAsState()
     val isConnected = connectionState == ConnectionState.CONNECTED
 
-    // ── Local state ──
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -52,14 +54,14 @@ fun ChatScreen() {
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
-        // ── Connection status bar ──
+        // ── Connection status strip ──
         if (!isConnected) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.errorContainer
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
             ) {
                 Text(
-                    "Nejste připojeni — nejprve se připojte z záložky Dashboard",
+                    "Nejste připojeni — přejděte do Status pro připojení",
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                     fontSize = 12.sp,
@@ -75,8 +77,8 @@ fun ChatScreen() {
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            contentPadding = PaddingValues(vertical = 8.dp)
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = PaddingValues(vertical = 12.dp)
         ) {
             // Empty state
             if (messages.isEmpty()) {
@@ -84,21 +86,27 @@ fun ChatScreen() {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(top = 80.dp),
+                            .padding(top = 100.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
-                                "Rails Terminal",
+                                "👋",
+                                fontSize = 40.sp
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                "Ahoj, já jsem Rails",
                                 fontSize = 20.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurface
                             )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                "Zadej zprávu pro Orchestrátor",
-                                fontSize = 13.sp,
-                                color = MaterialTheme.colorScheme.outline
+                                "Tvůj AI parťák pro produktivitu.\nNapiš mi cokoliv a poradím ti.",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.outline,
+                                lineHeight = 20.sp
                             )
                         }
                     }
@@ -114,7 +122,7 @@ fun ChatScreen() {
         // ── Input Bar ──
         Surface(
             modifier = Modifier.fillMaxWidth(),
-            shadowElevation = 8.dp,
+            shadowElevation = 4.dp,
             color = MaterialTheme.colorScheme.surface
         ) {
             Row(
@@ -130,18 +138,18 @@ fun ChatScreen() {
                     modifier = Modifier.weight(1f),
                     placeholder = {
                         Text(
-                            if (isConnected) "Napiš zprávu..." else "Připojte se pro chat...",
+                            if (isConnected) "Napiš zprávu..." else "Připojte se...",
                             fontSize = 14.sp
                         )
                     },
                     enabled = isConnected,
                     singleLine = false,
                     maxLines = 4,
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(22.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                        focusedBorderColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        disabledBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
                         disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
                     ),
                     textStyle = LocalTextStyle.current.copy(
@@ -160,16 +168,16 @@ fun ChatScreen() {
                     },
                     enabled = isConnected && inputText.trim().isNotEmpty(),
                     modifier = Modifier.size(44.dp),
-                    shape = RoundedCornerShape(22.dp),
+                    shape = CircleShape,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant
+                        disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     )
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Send,
+                        imageVector = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Odeslat",
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = if (isConnected && inputText.trim().isNotEmpty())
                             MaterialTheme.colorScheme.onPrimary
                         else
@@ -182,12 +190,31 @@ fun ChatScreen() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  Chat Message Bubble
+//  Chat Message Bubble — Modern minimal design
 // ═══════════════════════════════════════════════════════════════════════
 
 @Composable
 fun MessageBubble(message: ChatMessage) {
     val isUser = message.role == MessageRole.USER
+    val isSystem = message.role == MessageRole.SYSTEM
+
+    // System messages — centered, subtle
+    if (isSystem) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                message.text,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.outline,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        return
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -195,10 +222,10 @@ fun MessageBubble(message: ChatMessage) {
     ) {
         Card(
             shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (isUser) 16.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 16.dp
+                topStart = 18.dp,
+                topEnd = 18.dp,
+                bottomStart = if (isUser) 18.dp else 4.dp,
+                bottomEnd = if (isUser) 4.dp else 18.dp
             ),
             colors = CardDefaults.cardColors(
                 containerColor = if (isUser)
@@ -206,22 +233,9 @@ fun MessageBubble(message: ChatMessage) {
                 else
                     MaterialTheme.colorScheme.surfaceContainerHigh
             ),
-            modifier = Modifier.widthIn(max = 280.dp)
+            modifier = Modifier.widthIn(max = 300.dp)
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                // Role label
-                Text(
-                    text = if (isUser) "TY" else "RAILS",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (isUser)
-                        MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
-                    else
-                        MaterialTheme.colorScheme.primary,
-                    letterSpacing = 0.5.sp
-                )
-                Spacer(modifier = Modifier.height(3.dp))
                 // Message text
                 Text(
                     text = message.text,
@@ -236,12 +250,11 @@ fun MessageBubble(message: ChatMessage) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = message.timestampText,
-                    fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
                     color = if (isUser)
                         MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.5f)
                     else
-                        MaterialTheme.colorScheme.outline
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)
                 )
             }
         }

@@ -6,9 +6,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Dashboard
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.filled.ChatBubble
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -16,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -26,6 +30,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import cz.julek.rails.ui.screens.ChatScreen
 import cz.julek.rails.ui.screens.DashboardScreen
+import cz.julek.rails.ui.screens.SettingsScreen
 import cz.julek.rails.ui.theme.RailsTheme
 import kotlinx.serialization.Serializable
 
@@ -33,15 +38,18 @@ import kotlinx.serialization.Serializable
 //  Navigation Routes
 // ═══════════════════════════════════════════════════════════════════════
 
-@Serializable object DashboardRoute
 @Serializable object ChatRoute
+@Serializable object StatusRoute
+@Serializable object SettingsRoute
 
 enum class BottomNavTab(
     val label: String,
-    val icon: ImageVector,
+    val selectedIcon: ImageVector,
+    val unselectedIcon: ImageVector,
 ) {
-    DASHBOARD("Dashboard", Icons.Filled.Dashboard),
-    CHAT("Terminal", Icons.Filled.Terminal),
+    CHAT("Chat", Icons.Filled.ChatBubble, Icons.Outlined.ChatBubbleOutline),
+    STATUS("Status", Icons.Filled.Dashboard, Icons.Outlined.Dashboard),
+    SETTINGS("Nastavení", Icons.Filled.Settings, Icons.Outlined.Settings),
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -66,10 +74,9 @@ class MainActivity : ComponentActivity() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-//  App Shell — TopBar + NavHost + BottomNavigation
+//  App Shell — Minimal nav with chat as primary screen
 // ═══════════════════════════════════════════════════════════════════════
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RailsAppShell() {
     val navController = rememberNavController()
@@ -77,76 +84,63 @@ fun RailsAppShell() {
     val currentDestination = navBackStackEntry?.destination
 
     val currentTab = when {
-        currentDestination?.hasRoute<ChatRoute>() == true -> BottomNavTab.CHAT
-        else -> BottomNavTab.DASHBOARD
+        currentDestination?.hasRoute<SettingsRoute>() == true -> BottomNavTab.SETTINGS
+        currentDestination?.hasRoute<StatusRoute>() == true -> BottomNavTab.STATUS
+        else -> BottomNavTab.CHAT
     }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        when (currentTab) {
-                            BottomNavTab.DASHBOARD -> "Dashboard"
-                            BottomNavTab.CHAT -> "Terminal"
-                        },
-                        fontWeight = FontWeight.Bold
-                    )
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow
-                )
-            )
-        },
         bottomBar = {
             NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-                tonalElevation = 3.dp
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 2.dp
             ) {
                 BottomNavTab.entries.forEach { tab ->
                     NavigationBarItem(
                         icon = {
                             Icon(
-                                imageVector = tab.icon,
+                                imageVector = if (currentTab == tab) tab.selectedIcon else tab.unselectedIcon,
                                 contentDescription = tab.label,
-                                modifier = Modifier.then(
-                                    if (currentTab == tab) Modifier
-                                    else Modifier
-                                )
+                                modifier = Modifier.size(22.dp)
                             )
                         },
                         label = {
                             Text(
                                 tab.label,
-                                fontWeight = if (currentTab == tab) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 12.sp
+                                fontWeight = if (currentTab == tab) FontWeight.SemiBold else FontWeight.Normal,
+                                fontSize = 11.sp
                             )
                         },
                         selected = currentDestination?.hierarchy?.any {
                             when (tab) {
-                                BottomNavTab.DASHBOARD -> it.hasRoute<DashboardRoute>()
                                 BottomNavTab.CHAT -> it.hasRoute<ChatRoute>()
+                                BottomNavTab.STATUS -> it.hasRoute<StatusRoute>()
+                                BottomNavTab.SETTINGS -> it.hasRoute<SettingsRoute>()
                             }
                         } == true,
                         onClick = {
                             navController.navigate(
                                 when (tab) {
-                                    BottomNavTab.DASHBOARD -> DashboardRoute
                                     BottomNavTab.CHAT -> ChatRoute
+                                    BottomNavTab.STATUS -> StatusRoute
+                                    BottomNavTab.SETTINGS -> SettingsRoute
                                 }
                             ) {
-                                // Pop up to the start destination of the graph to
-                                // avoid building up a large stack of destinations
                                 popUpTo(navController.graph.findStartDestination().id) {
                                     saveState = true
                                 }
-                                // Avoid multiple copies of the same destination
                                 launchSingleTop = true
-                                // Restore state when re-selecting a previously selected tab
                                 restoreState = true
                             }
-                        }
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     )
                 }
             }
@@ -154,17 +148,18 @@ fun RailsAppShell() {
     ) { innerPadding ->
         NavHost(
             navController = navController,
-            startDestination = DashboardRoute,
+            startDestination = ChatRoute,
             modifier = Modifier.padding(innerPadding)
         ) {
-            composable<DashboardRoute> {
-                DashboardScreen()
-            }
             composable<ChatRoute> {
                 ChatScreen()
+            }
+            composable<StatusRoute> {
+                DashboardScreen()
+            }
+            composable<SettingsRoute> {
+                SettingsScreen()
             }
         }
     }
 }
-
-
