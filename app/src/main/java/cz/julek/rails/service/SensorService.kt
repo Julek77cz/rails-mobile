@@ -46,6 +46,7 @@ class SensorService : Service() {
         const val TAG = "Rails/Sensor"
         const val CHANNEL_ID = "rails_sensor"
         const val CHANNEL_ID_ALERTS = "rails_alerts"  // High-priority for interventions
+        const val CHANNEL_ID_CHAT = "rails_chat"    // Chat messages from AI
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
@@ -101,9 +102,10 @@ class SensorService : Service() {
     private fun startSensor() {
         Log.i(TAG, "Starting sensor service — connecting to Firebase")
 
-        // Create BOTH notification channels
+        // Create ALL notification channels
         createNotificationChannel()
         createAlertNotificationChannel()
+        createChatNotificationChannel()
 
         // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -187,6 +189,12 @@ class SensorService : Service() {
         FirebaseManager.onIntervene = { message ->
             Log.w(TAG, "INTERVENE callback: $message")
             showInterventionNotification(message)
+        }
+
+        // CHAT MESSAGE — show notification when AI responds (user may be outside app)
+        FirebaseManager.onChatMessage = { text ->
+            Log.i(TAG, "Chat message callback: ${text.substring(0, minOf(60, text.length))}")
+            showChatNotification(text)
         }
 
         // BLOCK_APPS — start overlay for blocked apps
@@ -527,6 +535,29 @@ class SensorService : Service() {
     }
 
     /**
+     * Notification channel for AI chat responses.
+     * Uses IMPORTANCE_HIGH so it makes sound, vibrates, and shows as heads-up.
+     * The user sees these when the AI replies while the app is in the background.
+     */
+    private fun createChatNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID_CHAT,
+            "Rails Chat",
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Zprávy od AI asistenta"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 150, 100, 150)
+            enableLights(true)
+            lightColor = 0xFF1976D2.toInt()  // Blue
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    /**
      * Show a high-priority notification when the AI Judge intervenes.
      * Uses the alerts channel which has sound + vibration.
      */
@@ -554,6 +585,42 @@ class SensorService : Service() {
         notificationManager.notify(2001, notification)
 
         Log.i(TAG, "Intervention notification shown: ${message.substring(0, minOf(60, message.length))}")
+    }
+
+    /**
+     * Show a notification when the AI sends a chat response.
+     * Uses a separate chat channel with sound + vibration so the user
+     * is alerted even when the app is in the background.
+     */
+    private fun showChatNotification(text: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 1, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Truncate for notification preview (full text in BigTextStyle)
+        val previewText = if (text.length > 80) text.substring(0, 80) + "..." else text
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID_CHAT)
+            .setContentTitle("Rails")
+            .setContentText(previewText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        // Use a unique ID based on timestamp so multiple messages don't overwrite
+        val notificationId = (System.currentTimeMillis() % 100000).toInt()
+        notificationManager.notify(notificationId, notification)
+
+        Log.i(TAG, "Chat notification shown: ${text.substring(0, minOf(60, text.length))}")
     }
 
     private fun buildNotification(): Notification {

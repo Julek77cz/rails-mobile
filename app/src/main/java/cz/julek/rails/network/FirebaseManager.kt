@@ -104,6 +104,9 @@ object FirebaseManager {
     var onUnblockApps: ((message: String) -> Unit)? = null
     var onLockScreen: ((message: String) -> Unit)? = null
 
+    // Chat message callback — fired when AI sends a response (for system notification)
+    var onChatMessage: ((text: String) -> Unit)? = null
+
     // ═══════════════════════════════════════════════════════════════════
     //  App Name Mapping
     // ═══════════════════════════════════════════════════════════════════
@@ -318,6 +321,8 @@ object FirebaseManager {
                     if (!isOldTimestamp && !isDuplicate) {
                         lastChatOutboxTimestamp = timestamp
                         addOrchestratorMessage(text)
+                        // Notify SensorService to show system notification
+                        onChatMessage?.invoke(text)
                     } else {
                         Log.d(TAG, "Skipping duplicate outbox message: ${text.substring(0, minOf(40, text.length))}")
                     }
