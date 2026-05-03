@@ -6,30 +6,17 @@
          Rails Mobile — Permissions
          ═══════════════════════════════════════════════════════════════ -->
 
-    <!-- Network: komunikace s Firebase Realtime Database -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- Foreground Service: Android nezabije senzorovou službu -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
-    <!-- Notification: povinné pro Android 13+ k zobrazení foreground notifikace -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Usage Stats: detekce aplikace v popředí (vyžaduje ruční povolení v nastavení) -->
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-
-    <!-- System Alert Window: celoobrazovkový overlay pro intervence -->
     <uses-permission
         android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- Wake Lock: udržet senzorovou službu aktivní pro periodický polling -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <!-- Screen state: detekce zapnutí/vypnutí displeje -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -41,7 +28,6 @@
         android:theme="@style/Theme.Rails"
         tools:targetApi="35">
 
-        <!-- ═══ MainActivity ═══ -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -52,18 +38,28 @@
             </intent-filter>
         </activity>
 
-        <!-- ═══ Foreground Service — senzor (screen + app detection) ═══ -->
         <service
             android:name=".service.SensorService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- ═══ Overlay Service — blokační overlay při intervenci ═══ -->
         <service
             android:name=".overlay.OverlayService"
             android:exported="false" />
 
-        <!-- ═══ BroadcastReceiver — screen on/off + USER_PRESENT (unlock) ═══ -->
+        <service
+            android:name=".service.AppWatcherService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="Rails Blokování">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <receiver
             android:name=".service.ScreenReceiver"
             android:exported="false">
