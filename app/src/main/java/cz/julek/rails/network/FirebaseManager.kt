@@ -520,6 +520,8 @@ object FirebaseManager {
     /**
      * Load chat history from Firebase on connect.
      * Reads the last N messages from /rails/devices/my_phone/chat_history
+     * Deduplicates by (timestamp + role + text) to avoid showing the same
+     * message twice (both Android and Node.js write to chat_history).
      */
     fun loadChatHistory() {
         val ref = deviceRef ?: return
@@ -528,10 +530,16 @@ object FirebaseManager {
                 if (!snapshot.exists()) return@addOnSuccessListener
 
                 val historyMessages = mutableListOf<ChatMessage>()
+                val seen = mutableSetOf<String>()  // dedup key: "timestamp|role|text"
+
                 for (child in snapshot.children) {
                     val roleStr = child.child("role").getValue(String::class.java) ?: continue
                     val text = child.child("text").getValue(String::class.java) ?: continue
                     val timestamp = child.child("timestamp").getValue(Long::class.java) ?: continue
+
+                    // Dedup key — same message from Android + Node.js would have same timestamp
+                    val dedupKey = "$timestamp|$roleStr|${text.substring(0, minOf(40, text.length))}"
+                    if (!seen.add(dedupKey)) continue  // already seen, skip
 
                     val role = when (roleStr) {
                         "user" -> MessageRole.USER
