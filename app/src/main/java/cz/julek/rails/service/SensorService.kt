@@ -121,8 +121,8 @@ class SensorService : Service() {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
 
-        // Connect to Firebase (no IP address needed!)
-        FirebaseManager.connect()
+        // Connect to Firebase — pass context so it can persist blocked apps locally
+        FirebaseManager.connect(this)
 
         // Register Firebase command callbacks (includes intervention notifications)
         registerFirebaseCallbacks()

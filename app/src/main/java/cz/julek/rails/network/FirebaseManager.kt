@@ -10,6 +10,8 @@ import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import android.content.Context
+import cz.julek.rails.service.AppWatcherService
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -107,6 +109,9 @@ object FirebaseManager {
     // Chat message callback — fired when AI sends a response (for system notification)
     var onChatMessage: ((text: String) -> Unit)? = null
 
+    // Application context for SharedPreferences access
+    private var appContext: Context? = null
+
     // ═══════════════════════════════════════════════════════════════════
     //  App Name Mapping
     // ═══════════════════════════════════════════════════════════════════
@@ -155,13 +160,14 @@ object FirebaseManager {
      * Connect to Firebase Realtime Database.
      * No IP address needed — Firebase handles routing automatically.
      */
-    fun connect() {
+    fun connect(context: Context? = null) {
         if (_connectionState.value == ConnectionState.CONNECTING ||
             _connectionState.value == ConnectionState.CONNECTED) {
             Log.w(TAG, "Already connecting/connected — ignoring duplicate connect()")
             return
         }
 
+        appContext = context ?: appContext
         _connectionState.value = ConnectionState.CONNECTING
         Log.i(TAG, "Connecting to Firebase Realtime Database...")
 
@@ -268,6 +274,10 @@ object FirebaseManager {
                         val appsList = (data["appsToBlock"] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
                         Log.w(TAG, "BLOCK_APPS command received: apps=$appsList message=$message")
                         _blockedApps.value = appsList
+
+                        // Persist locally so blocking works even without Firebase
+                        appContext?.let { AppWatcherService.saveBlockedApps(it, appsList) }
+
                         addSystemMessage("🚫 Blokováno: ${appsList.joinToString(", ")}")
                         onBlockApps?.invoke(appsList, message)
                     }
@@ -275,6 +285,10 @@ object FirebaseManager {
                     "UNBLOCK_APPS" -> {
                         Log.i(TAG, "UNBLOCK_APPS command received: $message")
                         _blockedApps.value = emptyList()
+
+                        // Clear local persistence too
+                        appContext?.let { AppWatcherService.clearBlockedApps(it) }
+
                         addSystemMessage("✅ Aplikace odblokovány")
                         onUnblockApps?.invoke(message)
                     }
@@ -288,6 +302,10 @@ object FirebaseManager {
                     "CLEAR" -> {
                         Log.i(TAG, "CLEAR command received")
                         _blockedApps.value = emptyList()
+
+                        // Clear local persistence too
+                        appContext?.let { AppWatcherService.clearBlockedApps(it) }
+
                         addSystemMessage("Intervence zrušena")
                         onClear?.invoke()
                     }
