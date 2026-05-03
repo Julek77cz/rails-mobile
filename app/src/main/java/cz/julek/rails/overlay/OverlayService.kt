@@ -34,6 +34,7 @@ import android.view.View
 class OverlayService : Service() {
 
     companion object {
+        const val TAG = "Rails/Overlay"
         const val ACTION_INTERVENE = "cz.julek.rails.action.INTERVENE"
         const val ACTION_CLEAR = "cz.julek.rails.action.CLEAR"
         const val ACTION_LOCK_SCREEN = "cz.julek.rails.action.LOCK_SCREEN"
@@ -52,13 +53,16 @@ class OverlayService : Service() {
         when (intent?.action) {
             ACTION_INTERVENE -> {
                 val message = intent.getStringExtra(EXTRA_MESSAGE) ?: "Zpatky do prace!"
+                Log.w(TAG, "Showing BLOCK overlay: $message")
                 showOverlay(OverlayType.BLOCK, message)
             }
             ACTION_LOCK_SCREEN -> {
                 val message = intent.getStringExtra(EXTRA_MESSAGE) ?: "Zamkni telefon!"
+                Log.w(TAG, "Showing LOCK overlay: $message")
                 showOverlay(OverlayType.LOCK, message)
             }
             ACTION_CLEAR -> {
+                Log.i(TAG, "Clearing overlay")
                 removeOverlay()
                 stopSelf()
             }
@@ -179,8 +183,14 @@ class OverlayService : Service() {
         }
 
         // Show overlay
-        windowManager.addView(layout, params)
-        overlayView = layout
+        try {
+            windowManager.addView(layout, params)
+            overlayView = layout
+            Log.w(TAG, "Overlay successfully displayed: type=$type")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show overlay: ${e.message}. " +
+                    "Check SYSTEM_ALERT_WINDOW permission in Settings!")
+        }
     }
 
     private fun removeOverlay() {

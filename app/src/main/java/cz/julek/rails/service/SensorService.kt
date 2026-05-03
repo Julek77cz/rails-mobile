@@ -436,6 +436,13 @@ class SensorService : Service() {
     // ═══════════════════════════════════════════════════════════════════
 
     private fun startOverlayService(type: String, message: String) {
+        // Check overlay permission before attempting to show
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Log.e(TAG, "Cannot show overlay — SYSTEM_ALERT_WINDOW permission not granted! " +
+                    "User must enable it in Settings > Apps > Special access > Display over other apps")
+            return
+        }
+
         val intent = Intent(this, cz.julek.rails.overlay.OverlayService::class.java).apply {
             action = when (type) {
                 "BLOCK" -> cz.julek.rails.overlay.OverlayService.ACTION_INTERVENE
@@ -444,6 +451,7 @@ class SensorService : Service() {
             }
             putExtra(cz.julek.rails.overlay.OverlayService.EXTRA_MESSAGE, message)
         }
+        Log.w(TAG, "Starting OverlayService: type=$type message=${message.substring(0, minOf(60, message.length))}")
         startService(intent)
     }
 
