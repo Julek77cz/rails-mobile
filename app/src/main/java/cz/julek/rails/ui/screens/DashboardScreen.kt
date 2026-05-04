@@ -1,6 +1,6 @@
 package cz.julek.rails.ui.screens
 
-import android.app.UsageStatsManager
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -327,7 +327,7 @@ fun DashboardScreen() {
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     "1. Povol všechna oprávnění výše\n" +
-                    "2. Stiskni „Připojit a Spustit senzor"\n" +
+                    "2. Stiskni \"Připojit a Spustit senzor\"\n" +
                     "3. Aplikace se připojí přes Firebase cloud\n" +
                     "4. Stav displeje a aktivní app se odesílají na PC\n" +
                     "5. AI hlídá tvou produktivitu a zasahuje při prokrastinaci",

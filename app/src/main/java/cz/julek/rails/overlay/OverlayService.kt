@@ -2,6 +2,7 @@ package cz.julek.rails.overlay
 
 import android.app.Service
 import android.content.Intent
+import android.util.Log
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder

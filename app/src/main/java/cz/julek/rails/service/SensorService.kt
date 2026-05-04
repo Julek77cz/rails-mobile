@@ -220,7 +220,7 @@ class SensorService : Service() {
                     // FALLBACK: If AppWatcherService is NOT running, we kick directly
                     // from here. This handles the case where the user hasn't enabled
                     // the Accessibility Service in Settings.
-                    if (!AppWatcherService.isRunning()) {
+                    if (!AppWatcherService.isRunning) {
                         Log.w(TAG, "AppWatcherService NOT running — SensorService fallback kick!")
                         kickToHomeScreen()
 

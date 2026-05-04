@@ -47,14 +47,14 @@ fun OnboardingScreen(onComplete: () -> Unit) {
     val scrollState = rememberScrollState()
 
     // Permission states — re-checked on resume
-    var usageStatsGranted by remember { mutableStateOf(checkUsageStatsPermission(context)) }
-    var accessibilityEnabled by remember { mutableStateOf(AppWatcherService.isRunning()) }
-    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var usageStatsGranted by remember { mutableStateOf<Boolean>(checkUsageStatsPermissionLocal(context)) }
+    var accessibilityEnabled by remember { mutableStateOf<Boolean>(AppWatcherService.isRunning) }
+    var overlayGranted by remember { mutableStateOf<Boolean>(Settings.canDrawOverlays(context)) }
 
     // Refresh states when screen becomes visible (user returns from settings)
     LaunchedEffect(Unit) {
-        usageStatsGranted = checkUsageStatsPermission(context)
-        accessibilityEnabled = AppWatcherService.isRunning()
+        usageStatsGranted = checkUsageStatsPermissionLocal(context)
+        accessibilityEnabled = AppWatcherService.isRunning
         overlayGranted = Settings.canDrawOverlays(context)
     }
 
@@ -63,8 +63,8 @@ fun OnboardingScreen(onComplete: () -> Unit) {
     DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                usageStatsGranted = checkUsageStatsPermission(context)
-                accessibilityEnabled = AppWatcherService.isRunning()
+                usageStatsGranted = checkUsageStatsPermissionLocal(context)
+                accessibilityEnabled = AppWatcherService.isRunning
                 overlayGranted = Settings.canDrawOverlays(context)
             }
         }
@@ -307,7 +307,7 @@ private fun PermissionCard(
     }
 }
 
-private fun checkUsageStatsPermission(context: Context): Boolean {
+private fun checkUsageStatsPermissionLocal(context: Context): Boolean {
     val usageStatsManager = context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
     val now = System.currentTimeMillis()
     // Check if we can query usage stats — if it returns empty, permission is not granted

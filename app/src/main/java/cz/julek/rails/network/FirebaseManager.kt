@@ -16,6 +16,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.collections.ArrayDeque
 
 /**
  * Firebase Manager — cloud relay for communication with Rails Orchestrator.
@@ -84,14 +85,14 @@ object FirebaseManager {
 
     // Dedup buffer: remember last N outbox message texts to prevent duplicates
     // on orchestrator restart (Firebase re-sends the same value on reconnect)
-    private val recentOutboxTexts = ArrayDeque<String>(maxSize = 10)
+    private val recentOutboxTexts = ArrayDeque<String>(DEDUP_BUFFER_SIZE)
     private const val DEDUP_BUFFER_SIZE = 10
 
     private fun isDuplicateOutbox(text: String): Boolean {
         if (recentOutboxTexts.contains(text)) return true
         recentOutboxTexts.addLast(text)
         if (recentOutboxTexts.size > DEDUP_BUFFER_SIZE) {
-            recentOutboxTexts.removeFirst()
+            recentOutboxTexts.removeAt(0)
         }
         return false
     }
