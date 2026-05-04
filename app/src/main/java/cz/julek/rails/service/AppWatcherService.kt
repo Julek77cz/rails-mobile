@@ -20,21 +20,14 @@ import cz.julek.rails.network.FirebaseManager
 /**
  * App Watcher Service — Bulletproof AccessibilityService for blocked app detection.
  *
- * DUAL MECHANISM (like AppBlock/Forest/Freedom):
- *   Mechanism 1: AccessibilityEvent (TYPE_WINDOW_STATE_CHANGED) — instant, 0ms
- *   Mechanism 2: UsageStatsManager polling every 500ms — reliable backup
- *
- * Why both? Accessibility events are sometimes NOT fired when an app is
- * resumed from recents (activity already exists, just being resumed).
- * UsageStatsManager is slower (~500ms) but 100% reliable.
- *
- * Defense layers when blocked app detected:
- *   1. performGlobalAction(GLOBAL_ACTION_HOME) — system-level
- *   2. startActivity(homeIntent) — ALWAYS, not just as fallback
- *   3. TYPE_ACCESSIBILITY_OVERLAY — visual barrier
- *   4. Delayed re-checks (500ms, 1s, 2s)
- *   5. Local persistence (SharedPreferences)
- *   6. forceCheckAndKick() — when BLOCK_APPS arrives while app is already open
+ * KEY FIXES vs previous version:
+ *   FIX 1: scheduleRecheck now uses a snapshot of blockedPackage, NOT
+ *           currentForegroundPackage — so re-kicks fire even after launcher shows.
+ *   FIX 2: monitorRunnable NEVER stops itself — only explicit stopMonitoring() can.
+ *   FIX 3: Polling interval reduced to 300ms.
+ *   FIX 4: Split-screen: TYPE_WINDOWS_CHANGED + FLAG_INCLUDE_NOT_IMPORTANT_VIEWS.
+ *   FIX 5: isLauncher() is dynamic (PackageManager) — works with any launcher.
+ *   FIX 6: startMonitoring() is always called on service connect, not conditionally.
  */
 class AppWatcherService : AccessibilityService() {
 
@@ -42,12 +35,8 @@ class AppWatcherService : AccessibilityService() {
         private const val TAG = "Rails/AppWatcher"
         private const val PREFS_NAME = "rails_blocked_apps"
         private const val KEY_BLOCKED_APPS = "blocked_apps_set"
-        private const val MONITOR_INTERVAL_MS = 500L
+        private const val MONITOR_INTERVAL_MS = 300L
 
-        /**
-         * Current foreground package — tracked by BOTH accessibility events
-         * AND UsageStatsManager polling. The polling is the reliable one.
-         */
         private var currentForegroundPackage: String = ""
 
         private var _isRunning: Boolean = false
@@ -56,9 +45,9 @@ class AppWatcherService : AccessibilityService() {
         private var instance: AppWatcherService? = null
         private val handler = Handler(Looper.getMainLooper())
 
-        // ── Continuous Monitoring ──
         private var monitorRunnable: Runnable? = null
-        private var isMonitoring: Boolean = false
+
+        @Volatile private var isMonitoring: Boolean = false
 
         fun saveBlockedApps(context: Context, apps: List<String>) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -76,12 +65,6 @@ class AppWatcherService : AccessibilityService() {
             prefs.edit().remove(KEY_BLOCKED_APPS).apply()
         }
 
-        /**
-         * Start the continuous monitoring loop.
-         * Every 500ms, checks the foreground app via UsageStatsManager.
-         * This is the RELIABLE backup for accessibility events.
-         * Called when blocked apps are set / when service connects.
-         */
         fun startMonitoring() {
             if (isMonitoring) return
             isMonitoring = true
@@ -89,51 +72,36 @@ class AppWatcherService : AccessibilityService() {
 
             monitorRunnable = object : Runnable {
                 override fun run() {
-                    val svc = instance ?: return
+                    if (!isMonitoring) return
 
-                    // Check if there are any blocked apps at all
-                    val hasBlockedApps = FirebaseManager.blockedApps.value.isNotEmpty() ||
-                            loadBlockedApps(svc).isNotEmpty()
-
-                    if (!hasBlockedApps) {
-                        // No blocked apps — stop monitoring to save battery
-                        isMonitoring = false
-                        Log.d(TAG, "No blocked apps — stopping monitoring loop")
+                    val svc = instance
+                    if (svc == null) {
+                        handler.postDelayed(this, MONITOR_INTERVAL_MS * 3)
                         return
                     }
 
-                    // Get the REAL foreground app via UsageStatsManager
-                    val fg = svc.getForegroundAppViaUsageStats()
-                    if (fg != null && fg != currentForegroundPackage) {
-                        Log.d(TAG, "Monitor: foreground changed $currentForegroundPackage → $fg")
-                        currentForegroundPackage = fg
+                    val fg = svc.getForegroundAppViaUsageStats() ?: currentForegroundPackage
+                    if (fg.isNotEmpty()) {
+                        val wasChanged = fg != currentForegroundPackage
+                        if (wasChanged) {
+                            Log.d(TAG, "Monitor: foreground $currentForegroundPackage → $fg")
+                            currentForegroundPackage = fg
+                        }
 
-                        // Is it blocked?
                         if (!svc.isLauncher(fg) && !fg.startsWith("cz.julek.rails") && svc.isBlocked(fg)) {
                             val appName = FirebaseManager.getFriendlyAppName(fg)
-                            Log.w(TAG, "Monitor: BLOCKED app $appName ($fg) detected — kicking!")
+                            Log.w(TAG, "Monitor: BLOCKED $appName ($fg) — kicking!")
                             svc.engageAllDefenseLayers(fg)
                         }
-                    } else if (fg != null && fg == currentForegroundPackage && svc.isBlocked(fg) && !svc.isLauncher(fg)) {
-                        // Same package as before but still blocked — maybe our kick failed.
-                        // Re-engage to be safe.
-                        Log.w(TAG, "Monitor: BLOCKED app ($fg) still in foreground — re-engaging!")
-                        svc.engageAllDefenseLayers(fg)
                     }
 
-                    // Schedule next check
-                    if (isMonitoring) {
-                        handler.postDelayed(this, MONITOR_INTERVAL_MS)
-                    }
+                    handler.postDelayed(this, MONITOR_INTERVAL_MS)
                 }
             }
 
             handler.post(monitorRunnable!!)
         }
 
-        /**
-         * Stop the continuous monitoring loop.
-         */
         fun stopMonitoring() {
             isMonitoring = false
             monitorRunnable?.let { handler.removeCallbacks(it) }
@@ -142,13 +110,8 @@ class AppWatcherService : AccessibilityService() {
         }
 
         fun forceCheckAndKick() {
-            val svc = instance
-            if (svc == null) {
-                Log.w(TAG, "forceCheckAndKick: service not running!")
-                return
-            }
+            val svc = instance ?: return
 
-            // Use UsageStatsManager for the MOST RELIABLE foreground check
             val fg = svc.getForegroundAppViaUsageStats() ?: currentForegroundPackage
             if (fg.isEmpty()) return
             if (fg.startsWith("cz.julek.rails") || svc.isLauncher(fg)) return
@@ -162,10 +125,6 @@ class AppWatcherService : AccessibilityService() {
             }
         }
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  Overlay — Pre-created for instant display
-    // ═══════════════════════════════════════════════════════════════════
 
     private var windowManager: WindowManager? = null
     private var overlayView: FrameLayout? = null
@@ -244,51 +203,46 @@ class AppWatcherService : AccessibilityService() {
         isOverlayShowing = false
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Service Lifecycle
-    // ═══════════════════════════════════════════════════════════════════
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         _isRunning = true
         instance = this
 
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOWS_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.DEFAULT or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
             notificationTimeout = 0
         }
 
         createOverlay()
 
-        // If there are already blocked apps, start monitoring immediately
-        val localBlocked = loadBlockedApps(this)
-        if (localBlocked.isNotEmpty() || FirebaseManager.blockedApps.value.isNotEmpty()) {
-            startMonitoring()
-            handler.postDelayed({ forceCheckAndKick() }, 500L)
-        }
+        // Always start monitoring — the loop checks for blocked apps every 300ms
+        startMonitoring()
+        handler.postDelayed({ forceCheckAndKick() }, 300L)
 
-        Log.i(TAG, "AppWatcher connected — dual mechanism (events + polling)")
+        Log.i(TAG, "AppWatcher connected — dual mechanism (events + 300ms polling)")
     }
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  Mechanism 1: Accessibility Events (instant, but unreliable)
-    // ═══════════════════════════════════════════════════════════════════
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
 
         val packageName = event.packageName?.toString() ?: return
         if (packageName.isEmpty()) return
 
-        // Update foreground tracking
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            checkAllVisibleWindows()
+            return
+        }
+
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+
         currentForegroundPackage = packageName
 
-        // Skip our own app and launcher
         if (packageName.startsWith("cz.julek.rails")) {
             hideOverlay()
             return
@@ -298,23 +252,28 @@ class AppWatcherService : AccessibilityService() {
             return
         }
 
-        // Check if blocked
         if (!isBlocked(packageName)) return
 
-        // BLOCKED — engage!
         Log.w(TAG, "Event: BLOCKED $packageName detected — engaging!")
         engageAllDefenseLayers(packageName)
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Mechanism 2: UsageStatsManager polling (500ms, reliable)
-    // ═══════════════════════════════════════════════════════════════════
+    private fun checkAllVisibleWindows() {
+        try {
+            val wins = windows ?: return
+            for (window in wins) {
+                val pkg = window.root?.packageName?.toString() ?: continue
+                if (pkg.isNotEmpty() && !pkg.startsWith("cz.julek.rails") && !isLauncher(pkg) && isBlocked(pkg)) {
+                    Log.w(TAG, "WindowsChanged: BLOCKED $pkg visible (split-screen?) — engaging!")
+                    engageAllDefenseLayers(pkg)
+                    return
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "checkAllVisibleWindows failed: ${e.message}")
+        }
+    }
 
-    /**
-     * Get the current foreground app using UsageStatsManager.
-     * This is SLOWER than accessibility events but 100% RELIABLE.
-     * It works even when the app is resumed from recents (no event fired).
-     */
     private fun getForegroundAppViaUsageStats(): String? {
         return try {
             val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
@@ -339,45 +298,31 @@ class AppWatcherService : AccessibilityService() {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Defense Layers — ALL called together, no fallback logic
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Engage ALL defense layers when a blocked app is detected.
-     * Called from both accessibility events AND polling monitor.
-     */
     private fun engageAllDefenseLayers(packageName: String) {
         val appName = FirebaseManager.getFriendlyAppName(packageName)
 
-        // Layer 1: performGlobalAction — ALWAYS try
         val globalResult = performGlobalAction(GLOBAL_ACTION_HOME)
         Log.d(TAG, "  Layer 1: performGlobalAction(HOME) = $globalResult")
 
-        // Layer 2: startActivity — ALWAYS call (not just as fallback!)
-        // On some devices, performGlobalAction returns true but doesn't actually work.
-        // Calling both ensures one of them will succeed.
         goToHomeScreen()
-
-        // Layer 3: Overlay
         showOverlay(appName)
-
-        // Layer 4: Notify
         notifyBlocked(appName)
 
-        // Layer 5: Delayed re-checks
-        scheduleRecheck(packageName, 500L)
-        scheduleRecheck(packageName, 1000L)
-        scheduleRecheck(packageName, 2000L)
+        // Exponential re-checks — pass packageName as snapshot, NOT currentForegroundPackage
+        scheduleRecheck(packageName, 300L)
+        scheduleRecheck(packageName, 700L)
+        scheduleRecheck(packageName, 1500L)
+        scheduleRecheck(packageName, 3000L)
+        scheduleRecheck(packageName, 6000L)
 
-        // Layer 6: Auto-hide overlay after 3 seconds (if user is on home by then)
+        // Auto-hide overlay only when blocked app is actually gone
         handler.postDelayed({
-            if (currentForegroundPackage != packageName || !isBlocked(packageName)) {
+            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
+            if (!isBlocked(realFg) || isLauncher(realFg)) {
                 hideOverlay()
             }
-        }, 3000L)
+        }, 3500L)
 
-        // Ensure monitoring is running
         if (!isMonitoring) startMonitoring()
     }
 
@@ -413,10 +358,6 @@ class AppWatcherService : AccessibilityService() {
         Log.i(TAG, "AppWatcher destroyed")
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    //  Kick Mechanisms
-    // ═══════════════════════════════════════════════════════════════════
-
     fun goToHomeScreen() {
         try {
             val homeIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -429,15 +370,21 @@ class AppWatcherService : AccessibilityService() {
         }
     }
 
+    /**
+     * FIX: Uses getForegroundAppViaUsageStats() to check the REAL current foreground,
+     * NOT currentForegroundPackage (which was already the launcher by the time this runs).
+     */
     private fun scheduleRecheck(blockedPackage: String, delayMs: Long) {
         handler.postDelayed({
-            if (currentForegroundPackage == blockedPackage && isBlocked(blockedPackage)) {
-                Log.w(TAG, "Recheck: BLOCKED app still foreground after ${delayMs}ms — kicking again!")
+            if (!isBlocked(blockedPackage)) return@postDelayed
+
+            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
+
+            if (realFg == blockedPackage || matchesBlocked(realFg, blockedPackage)) {
+                Log.w(TAG, "Recheck @${delayMs}ms: $blockedPackage STILL foreground — kicking again!")
                 performGlobalAction(GLOBAL_ACTION_HOME)
                 goToHomeScreen()
                 showOverlay(FirebaseManager.getFriendlyAppName(blockedPackage))
-            } else {
-                hideOverlay()
             }
         }, delayMs)
     }
@@ -450,8 +397,12 @@ class AppWatcherService : AccessibilityService() {
         sendBroadcast(intent)
     }
 
+    /**
+     * FIX: Dynamic launcher detection via PackageManager.
+     * Works with Nova Launcher, Action Launcher, any 3rd-party launcher.
+     */
     fun isLauncher(packageName: String): Boolean {
-        val launchers = setOf(
+        val knownLaunchers = setOf(
             "com.google.android.apps.nexuslauncher",
             "com.android.launcher3",
             "com.android.launcher",
@@ -465,7 +416,20 @@ class AppWatcherService : AccessibilityService() {
             "com.sonyericsson.home",
             "com.lge.launcher2",
             "com.android.systemui",
+            "com.teslacoilsw.launcher",
+            "com.actionlauncher.playstore",
+            "net.oneplus.launcher",
+            "com.google.android.launcher",
+            "com.microsoft.launcher",
         )
-        return launchers.contains(packageName)
+        if (knownLaunchers.contains(packageName)) return true
+
+        return try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val resolveInfos = packageManager.queryIntentActivities(homeIntent, 0)
+            resolveInfos.any { it.activityInfo.packageName == packageName }
+        } catch (e: Exception) {
+            false
+        }
     }
 }
