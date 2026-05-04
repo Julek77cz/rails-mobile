@@ -279,6 +279,14 @@ object FirebaseManager {
                         appContext?.let { AppWatcherService.saveBlockedApps(it, appsList) }
 
                         addSystemMessage("🚫 Blokováno: ${appsList.joinToString(", ")}")
+
+                        // CRITICAL: Force-check the current foreground app.
+                        // If the blocked app is ALREADY open, no accessibility event
+                        // will fire (the app is already in the foreground).
+                        // We must actively check and kick NOW.
+                        Log.i(TAG, "Calling AppWatcherService.forceCheckAndKick() for immediate blocking")
+                        AppWatcherService.forceCheckAndKick()
+
                         onBlockApps?.invoke(appsList, message)
                     }
 

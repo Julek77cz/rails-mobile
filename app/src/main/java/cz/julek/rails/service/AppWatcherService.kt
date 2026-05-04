@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
@@ -13,7 +12,6 @@ import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.TextView
 import cz.julek.rails.network.FirebaseManager
 
@@ -27,6 +25,8 @@ import cz.julek.rails.network.FirebaseManager
  *   Layer 4: TYPE_ACCESSIBILITY_OVERLAY covers the screen (no SYSTEM_ALERT_WINDOW needed!)
  *   Layer 5: Delayed re-checks (300ms, 800ms) catch edge cases during transition
  *   Layer 6: Local persistence — blocked apps stored in SharedPreferences, not just Firebase
+ *   Layer 7: forceCheckAndKick() — called when BLOCK_APPS command arrives while
+ *            app is ALREADY open (no accessibility event fires for already-foreground app)
  *
  * KEY DESIGN DECISIONS:
  *   - NO cooldown, NO "lastKickedPackage" flag, NO "isShowingBlockOverlay" flag
@@ -34,6 +34,7 @@ import cz.julek.rails.network.FirebaseManager
  *   - Overlay is pre-created at service start, toggled to opaque instantly
  *   - Blocked apps cached locally in SharedPreferences (survives Firebase disconnect)
  *   - Both performGlobalAction AND startActivity as dual kick mechanism
+ *   - Static instance reference allows forceCheckAndKick() from anywhere
  */
 class AppWatcherService : AccessibilityService() {
 
@@ -51,6 +52,13 @@ class AppWatcherService : AccessibilityService() {
 
         private var _isRunning: Boolean = false
         val isRunning: Boolean get() = _isRunning
+
+        /**
+         * Static reference to the running service instance.
+         * Needed so we can call forceCheckAndKick() from FirebaseManager
+         * when a BLOCK_APPS command arrives while the app is already open.
+         */
+        private var instance: AppWatcherService? = null
 
         // Handler for delayed re-checks
         private val handler = Handler(Looper.getMainLooper())
@@ -87,6 +95,84 @@ class AppWatcherService : AccessibilityService() {
             prefs.edit().remove(KEY_BLOCKED_APPS).apply()
             Log.i(TAG, "Cleared blocked apps from local storage")
         }
+
+        /**
+         * FORCE check the current foreground app and kick if blocked.
+         *
+         * This is the CRITICAL method that fixes the bug where blocking
+         * doesn't work when the BLOCK_APPS command arrives while the
+         * blocked app is ALREADY open.
+         *
+         * When the user is in Instagram and the BLOCK_APPS command arrives,
+         * no new TYPE_WINDOW_STATE_CHANGED event fires (the app is already
+         * in the foreground). So the AccessibilityService's onAccessibilityEvent
+         * never gets called. This method bridges that gap.
+         *
+         * Called by:
+         *   - FirebaseManager when BLOCK_APPS command arrives
+         *   - SensorService as fallback (if AppWatcherService isn't running)
+         *   - Delayed re-checks
+         */
+        fun forceCheckAndKick() {
+            val svc = instance
+            if (svc == null) {
+                Log.w(TAG, "forceCheckAndKick: service instance is NULL — AppWatcherService not running!")
+                Log.w(TAG, "forceCheckAndKick: user needs to enable Accessibility Service in Settings")
+                return
+            }
+
+            val pkg = currentForegroundPackage
+            if (pkg.isEmpty()) {
+                Log.d(TAG, "forceCheckAndKick: no foreground package tracked yet")
+                return
+            }
+
+            // Skip launcher/our own app
+            if (pkg.startsWith("cz.julek.rails") || svc.isLauncher(pkg)) {
+                Log.d(TAG, "forceCheckAndKick: current app ($pkg) is launcher or our app — skip")
+                return
+            }
+
+            // Check if blocked
+            if (svc.isBlocked(pkg)) {
+                val appName = FirebaseManager.getFriendlyAppName(pkg)
+                Log.w(TAG, "forceCheckAndKick: BLOCKED app $appName ($pkg) is in foreground — kicking NOW!")
+
+                // Layer 1: performGlobalAction
+                val globalResult = svc.performGlobalAction(GLOBAL_ACTION_HOME)
+                Log.d(TAG, "  forceCheck: performGlobalAction(HOME) = $globalResult")
+
+                // Layer 2: startActivity fallback
+                if (!globalResult) {
+                    svc.goToHomeScreen()
+                }
+
+                // Layer 3: Show overlay
+                svc.showOverlay(appName)
+
+                // Layer 4: Notify
+                svc.notifyBlocked(appName)
+
+                // Layer 5: Delayed re-checks
+                svc.scheduleRecheck(pkg, 300L)
+                svc.scheduleRecheck(pkg, 800L)
+                svc.scheduleRecheck(pkg, 1500L)
+
+                // Layer 6: Auto-hide overlay
+                handler.postDelayed({
+                    if (currentForegroundPackage != pkg) {
+                        svc.hideOverlay()
+                    }
+                }, 2000L)
+            } else {
+                Log.d(TAG, "forceCheckAndKick: current app ($pkg) is NOT blocked")
+            }
+        }
+
+        /**
+         * Get the current foreground package name (for SensorService fallback).
+         */
+        fun getCurrentForegroundPackage(): String = currentForegroundPackage
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -118,7 +204,7 @@ class AppWatcherService : AccessibilityService() {
 
             // "Blocked" message
             val textView = TextView(this@AppWatcherService).apply {
-                text = "🚫 Tato aplikace je zablokována\nVrať se k práci!"
+                text = "Tato aplikace je zablokovana\nVrat se k praci!"
                 textSize = 20f
                 setTextColor(0xFFFFFFFF.toInt())
                 gravity = Gravity.CENTER
@@ -159,7 +245,7 @@ class AppWatcherService : AccessibilityService() {
      * Because the view is already added to the window manager,
      * this is essentially instant (no addView latency).
      */
-    private fun showOverlay(appName: String) {
+    fun showOverlay(appName: String) {
         if (overlayView == null) {
             Log.w(TAG, "Overlay not available — creating now (fallback)")
             createOverlay()
@@ -169,7 +255,7 @@ class AppWatcherService : AccessibilityService() {
             // Update the text to show which app is blocked
             (overlayView as? FrameLayout)?.let { frame ->
                 (frame.getChildAt(0) as? TextView)?.let { tv ->
-                    tv.text = "🚫 $appName je zablokována\nVrať se k práci!"
+                    tv.text = "$appName je zablokovana\nVrat se k praci!"
                 }
             }
 
@@ -191,7 +277,7 @@ class AppWatcherService : AccessibilityService() {
     /**
      * Hide the overlay — toggles back to transparent.
      */
-    private fun hideOverlay() {
+    fun hideOverlay() {
         if (!isOverlayShowing) return
 
         try {
@@ -223,6 +309,7 @@ class AppWatcherService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         _isRunning = true
+        instance = this
 
         serviceInfo = serviceInfo.apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
@@ -240,15 +327,14 @@ class AppWatcherService : AccessibilityService() {
         val localBlocked = loadBlockedApps(this)
         if (localBlocked.isNotEmpty() && FirebaseManager.blockedApps.value.isEmpty()) {
             Log.i(TAG, "Restoring ${localBlocked.size} blocked apps from local storage")
-            // Note: We don't directly set FirebaseManager.blockedApps from here
-            // because it's a StateFlow. Instead, we use the local cache in isBlocked()
+        }
+
+        // If there are already blocked apps and a foreground app, check immediately
+        if (localBlocked.isNotEmpty() || FirebaseManager.blockedApps.value.isNotEmpty()) {
+            handler.postDelayed({ forceCheckAndKick() }, 500L)
         }
 
         Log.i(TAG, "AppWatcher connected — bulletproof blocking active")
-        Log.i(TAG, "  - performGlobalAction(GLOBAL_ACTION_HOME) as primary kick")
-        Log.i(TAG, "  - startActivity(homeIntent) as fallback kick")
-        Log.i(TAG, "  - TYPE_ACCESSIBILITY_OVERLAY as visual barrier")
-        Log.i(TAG, "  - Local SharedPreferences persistence as backup")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -261,7 +347,6 @@ class AppWatcherService : AccessibilityService() {
         // Skip our own app
         if (packageName.startsWith("cz.julek.rails")) {
             currentForegroundPackage = packageName
-            // If we were showing an overlay and user opened our app, hide it
             hideOverlay()
             return
         }
@@ -269,7 +354,6 @@ class AppWatcherService : AccessibilityService() {
         // Skip launcher / system UI — never blocked
         if (isLauncher(packageName)) {
             currentForegroundPackage = packageName
-            // User is on home screen — hide overlay if showing
             hideOverlay()
             return
         }
@@ -319,7 +403,7 @@ class AppWatcherService : AccessibilityService() {
      * This ensures blocking works even when Firebase hasn't connected yet,
      * or when the StateFlow hasn't been updated.
      */
-    private fun isBlocked(packageName: String): Boolean {
+    fun isBlocked(packageName: String): Boolean {
         // Check Firebase StateFlow first (real-time)
         val firebaseBlocked = FirebaseManager.blockedApps.value
         if (firebaseBlocked.isNotEmpty()) {
@@ -352,6 +436,7 @@ class AppWatcherService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         _isRunning = false
+        instance = null
         handler.removeCallbacksAndMessages(null)
         removeOverlay()
         Log.i(TAG, "AppWatcher destroyed")
@@ -365,7 +450,7 @@ class AppWatcherService : AccessibilityService() {
      * Navigate to home screen using startActivity.
      * Used as FALLBACK when performGlobalAction fails.
      */
-    private fun goToHomeScreen() {
+    fun goToHomeScreen() {
         try {
             val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                 addCategory(Intent.CATEGORY_HOME)
@@ -380,39 +465,28 @@ class AppWatcherService : AccessibilityService() {
     /**
      * Schedule a delayed re-check: if the blocked app is STILL in the foreground
      * after the kick (system restored it), kick again + show overlay again.
-     *
-     * This handles edge cases like:
-     *   - System restores the previous task after our kick
-     *   - App has a pending intent that brings it back
-     *   - Gesture navigation bug on Android 14
      */
-    private fun scheduleRecheck(blockedPackage: String, delayMs: Long) {
+    fun scheduleRecheck(blockedPackage: String, delayMs: Long) {
         handler.postDelayed({
             if (currentForegroundPackage == blockedPackage && isBlocked(blockedPackage)) {
                 Log.w(TAG, "BLOCKED app STILL in foreground after ${delayMs}ms — kicking again!")
 
-                // Try global action again
                 val result = performGlobalAction(GLOBAL_ACTION_HOME)
                 if (!result) {
                     goToHomeScreen()
                 }
 
-                // Show overlay again
                 val appName = FirebaseManager.getFriendlyAppName(blockedPackage)
                 showOverlay(appName)
 
-                // Schedule one more recheck
                 handler.postDelayed({
                     if (currentForegroundPackage == blockedPackage) {
-                        Log.w(TAG, "BLOCKED app STILL THERE after recheck — force hiding overlay")
-                        // At this point, the overlay is our last defense
-                        // Keep it showing until the user navigates away
+                        Log.w(TAG, "BLOCKED app STILL THERE after recheck — keeping overlay visible")
                     } else {
                         hideOverlay()
                     }
                 }, 1000L)
             } else {
-                // App is no longer in foreground — we can hide overlay
                 hideOverlay()
             }
         }, delayMs)
@@ -426,7 +500,7 @@ class AppWatcherService : AccessibilityService() {
         sendBroadcast(intent)
     }
 
-    private fun isLauncher(packageName: String): Boolean {
+    fun isLauncher(packageName: String): Boolean {
         val launchers = setOf(
             "com.google.android.apps.nexuslauncher",
             "com.android.launcher3",

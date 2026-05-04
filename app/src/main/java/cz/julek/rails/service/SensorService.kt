@@ -200,9 +200,10 @@ class SensorService : Service() {
             showChatNotification(text)
         }
 
-        // BLOCK_APPS — show notification (AppWatcherService handles kicking)
+        // BLOCK_APPS — show notification + FALLBACK kick (if AppWatcherService isn't running)
         FirebaseManager.onBlockApps = { apps, message ->
             Log.w(TAG, "BLOCK_APPS callback: apps=$apps message=$message")
+
             // Show a block notification immediately
             val currentApp = lastForegroundApp
             if (currentApp.isNotEmpty()) {
@@ -212,8 +213,49 @@ class SensorService : Service() {
                     currentApp.contains(blockedApp, ignoreCase = true)
                 }
                 if (isBlocked) {
-                    showBlockNotification(FirebaseManager.getFriendlyAppName(currentApp))
+                    val appName = FirebaseManager.getFriendlyAppName(currentApp)
+                    showBlockNotification(appName)
                     isBlockNotificationShown = true
+
+                    // FALLBACK: If AppWatcherService is NOT running, we kick directly
+                    // from here. This handles the case where the user hasn't enabled
+                    // the Accessibility Service in Settings.
+                    if (!AppWatcherService.isRunning()) {
+                        Log.w(TAG, "AppWatcherService NOT running — SensorService fallback kick!")
+                        kickToHomeScreen()
+
+                        // Schedule re-checks as fallback
+                        scheduler?.schedule({
+                            try {
+                                val fg = getForegroundApp()
+                                if (fg != null && fg == currentApp) {
+                                    val stillBlocked = apps.any { blockedApp ->
+                                        fg.equals(blockedApp, ignoreCase = true) ||
+                                        FirebaseManager.getFriendlyAppName(fg).equals(blockedApp, ignoreCase = true) ||
+                                        fg.contains(blockedApp, ignoreCase = true)
+                                    }
+                                    if (stillBlocked) {
+                                        Log.w(TAG, "FALLBACK: blocked app still in foreground — kicking again")
+                                        kickToHomeScreen()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Fallback recheck error: ${e.message}")
+                            }
+                        }, 1, TimeUnit.SECONDS)
+
+                        scheduler?.schedule({
+                            try {
+                                val fg = getForegroundApp()
+                                if (fg != null && fg == currentApp) {
+                                    Log.w(TAG, "FALLBACK: blocked app STILL in foreground after 3s — kicking again")
+                                    kickToHomeScreen()
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Fallback recheck error: ${e.message}")
+                            }
+                        }, 3, TimeUnit.SECONDS)
+                    }
                 }
             }
         }
@@ -383,6 +425,30 @@ class SensorService : Service() {
         }
 
         return lastEvent?.packageName
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Fallback Kick — used when AppWatcherService isn't running
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Kick user to home screen.
+     * This is a FALLBACK for when AppWatcherService (AccessibilityService)
+     * is not running (e.g., user didn't enable it in Accessibility Settings).
+     * AppWatcherService uses performGlobalAction(GLOBAL_ACTION_HOME) which
+     * is more reliable, but this works as a backup.
+     */
+    private fun kickToHomeScreen() {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(homeIntent)
+            Log.i(TAG, "Fallback kick: user sent to home screen")
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallback kick failed: ${e.message}")
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
