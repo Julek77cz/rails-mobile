@@ -3,7 +3,9 @@ package cz.julek.rails.ui.screens
 import android.app.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -65,6 +67,7 @@ fun DashboardScreen() {
     var hasUsageStats by remember { mutableStateOf(checkUsageStatsPermission(context)) }
     var hasOverlay by remember { mutableStateOf(checkOverlayPermission(context)) }
     var hasNotifications by remember { mutableStateOf(checkNotificationPermission(context)) }
+    var hasBatteryOptimization by remember { mutableStateOf(checkBatteryOptimization(context)) }
 
     // Refresh permissions on resume
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -74,6 +77,7 @@ fun DashboardScreen() {
                 hasUsageStats = checkUsageStatsPermission(context)
                 hasOverlay = checkOverlayPermission(context)
                 hasNotifications = checkNotificationPermission(context)
+                hasBatteryOptimization = checkBatteryOptimization(context)
             }
         })
     }
@@ -81,6 +85,7 @@ fun DashboardScreen() {
         hasUsageStats = checkUsageStatsPermission(context)
         hasOverlay = checkOverlayPermission(context)
         hasNotifications = checkNotificationPermission(context)
+        hasBatteryOptimization = checkBatteryOptimization(context)
     }
 
     // Notification permission launcher
@@ -228,8 +233,34 @@ fun DashboardScreen() {
             }
         )
 
+        ModernPermissionCard(
+            icon = Icons.Outlined.BatteryAlert,
+            title = "Neomezená baterie",
+            subtitle = "Zabrání systému zabíjet službu na pozadí",
+            granted = hasBatteryOptimization,
+            onAction = {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:${context.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    // Fallback: open battery optimization settings directly
+                    try {
+                        val fallback = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(fallback)
+                    } catch (e2: Exception) {
+                        Toast.makeText(context, "Otevři nastavení baterie ručně", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        )
+
         // ── Permission Summary ──
-        val allGranted = hasUsageStats && hasOverlay && hasNotifications
+        val allGranted = hasUsageStats && hasOverlay && hasNotifications && hasBatteryOptimization
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(
@@ -518,6 +549,15 @@ fun checkNotificationPermission(context: Context): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
+    } else {
+        true
+    }
+}
+
+fun checkBatteryOptimization(context: Context): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        powerManager?.isIgnoringBatteryOptimizations(context.packageName) ?: false
     } else {
         true
     }

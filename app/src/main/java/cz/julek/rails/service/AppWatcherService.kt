@@ -18,16 +18,21 @@ import android.widget.TextView
 import cz.julek.rails.network.FirebaseManager
 
 /**
- * App Watcher Service — Bulletproof AccessibilityService for blocked app detection.
+ * App Watcher Service — Minimal, Storm-Free AccessibilityService
  *
- * KEY FIXES vs previous version:
- *   FIX 1: scheduleRecheck now uses a snapshot of blockedPackage, NOT
- *           currentForegroundPackage — so re-kicks fire even after launcher shows.
- *   FIX 2: monitorRunnable NEVER stops itself — only explicit stopMonitoring() can.
- *   FIX 3: Polling interval reduced to 300ms.
- *   FIX 4: Split-screen: TYPE_WINDOWS_CHANGED + FLAG_INCLUDE_NOT_IMPORTANT_VIEWS.
- *   FIX 5: isLauncher() is dynamic (PackageManager) — works with any launcher.
- *   FIX 6: startMonitoring() is always called on service connect, not conditionally.
+ * PREVIOUS BUG: engageAllDefenseLayers scheduled 5 rechecks (300/700/1500/3000/6000ms).
+ * The monitoring loop (every 300ms) also called engage when blocked app was detected.
+ * Each recheck that found the app still there called engage AGAIN → exponential
+ * callback growth → 50+ pending callbacks after 3 seconds → Android throttles/kills
+ * the accessibility service → blocking stops working after 2-3 attempts.
+ *
+ * FIX: RADICAL SIMPLIFICATION
+ *   1. ONE kick method with COOLDOWN (800ms) — prevents callback storms
+ *   2. ZERO scheduleRecheck — the monitoring loop IS the recheck
+ *   3. The loop runs every 500ms and naturally retries if kick failed
+ *   4. Dynamic launcher detection with CACHE — works with any custom launcher
+ *   5. Monitoring loop NEVER self-stops — only stopMonitoring() can stop it
+ *   6. startMonitoring() ALWAYS called on service connect
  */
 class AppWatcherService : AccessibilityService() {
 
@@ -35,19 +40,25 @@ class AppWatcherService : AccessibilityService() {
         private const val TAG = "Rails/AppWatcher"
         private const val PREFS_NAME = "rails_blocked_apps"
         private const val KEY_BLOCKED_APPS = "blocked_apps_set"
-        private const val MONITOR_INTERVAL_MS = 300L
+        private const val MONITOR_INTERVAL_MS = 500L
+        private const val KICK_COOLDOWN_MS = 800L
 
         private var currentForegroundPackage: String = ""
-
         private var _isRunning: Boolean = false
         val isRunning: Boolean get() = _isRunning
 
         private var instance: AppWatcherService? = null
         private val handler = Handler(Looper.getMainLooper())
 
-        private var monitorRunnable: Runnable? = null
+        // ── Cooldown: the single most important fix ──
+        private var lastKickTime: Long = 0
 
+        // ── Monitoring ──
+        private var monitorRunnable: Runnable? = null
         @Volatile private var isMonitoring: Boolean = false
+
+        // ── Launcher cache ──
+        private var cachedLauncherPackages: Set<String>? = null
 
         fun saveBlockedApps(context: Context, apps: List<String>) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -65,10 +76,15 @@ class AppWatcherService : AccessibilityService() {
             prefs.edit().remove(KEY_BLOCKED_APPS).apply()
         }
 
+        /**
+         * Start the monitoring loop. Runs every 500ms.
+         * The loop itself is the recheck mechanism — no scheduleRecheck needed.
+         * NEVER self-stops — only explicit stopMonitoring() can stop it.
+         */
         fun startMonitoring() {
             if (isMonitoring) return
             isMonitoring = true
-            Log.i(TAG, "Starting continuous monitoring (every ${MONITOR_INTERVAL_MS}ms)")
+            Log.i(TAG, "Starting monitoring loop (every ${MONITOR_INTERVAL_MS}ms)")
 
             monitorRunnable = object : Runnable {
                 override fun run() {
@@ -76,22 +92,27 @@ class AppWatcherService : AccessibilityService() {
 
                     val svc = instance
                     if (svc == null) {
-                        handler.postDelayed(this, MONITOR_INTERVAL_MS * 3)
+                        // Service not connected yet — retry less frequently
+                        handler.postDelayed(this, MONITOR_INTERVAL_MS * 4)
                         return
                     }
 
+                    // Get REAL foreground via UsageStatsManager
                     val fg = svc.getForegroundAppViaUsageStats() ?: currentForegroundPackage
                     if (fg.isNotEmpty()) {
-                        val wasChanged = fg != currentForegroundPackage
-                        if (wasChanged) {
-                            Log.d(TAG, "Monitor: foreground $currentForegroundPackage → $fg")
+                        val changed = fg != currentForegroundPackage
+                        if (changed) {
+                            Log.d(TAG, "Monitor: $currentForegroundPackage → $fg")
                             currentForegroundPackage = fg
                         }
 
-                        if (!svc.isLauncher(fg) && !fg.startsWith("cz.julek.rails") && svc.isBlocked(fg)) {
-                            val appName = FirebaseManager.getFriendlyAppName(fg)
-                            Log.w(TAG, "Monitor: BLOCKED $appName ($fg) — kicking!")
-                            svc.engageAllDefenseLayers(fg)
+                        if (fg.startsWith("cz.julek.rails")) {
+                            svc.hideOverlay()
+                        } else if (svc.isLauncherCached(fg)) {
+                            svc.hideOverlay()
+                        } else if (svc.isBlocked(fg)) {
+                            // Blocked app detected — kick with cooldown
+                            svc.kickWithCooldown(fg)
                         }
                     }
 
@@ -106,7 +127,7 @@ class AppWatcherService : AccessibilityService() {
             isMonitoring = false
             monitorRunnable?.let { handler.removeCallbacks(it) }
             monitorRunnable = null
-            Log.i(TAG, "Stopped continuous monitoring")
+            Log.i(TAG, "Stopped monitoring loop")
         }
 
         fun forceCheckAndKick() {
@@ -114,17 +135,20 @@ class AppWatcherService : AccessibilityService() {
 
             val fg = svc.getForegroundAppViaUsageStats() ?: currentForegroundPackage
             if (fg.isEmpty()) return
-            if (fg.startsWith("cz.julek.rails") || svc.isLauncher(fg)) return
+            if (fg.startsWith("cz.julek.rails") || svc.isLauncherCached(fg)) return
 
             currentForegroundPackage = fg
 
             if (svc.isBlocked(fg)) {
-                val appName = FirebaseManager.getFriendlyAppName(fg)
-                Log.w(TAG, "forceCheckAndKick: BLOCKED $appName ($fg) — engaging!")
-                svc.engageAllDefenseLayers(fg)
+                Log.w(TAG, "forceCheckAndKick: BLOCKED $fg — kicking!")
+                svc.kickWithCooldown(fg, force = true)
             }
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Overlay — Pre-created for instant display
+    // ═══════════════════════════════════════════════════════════════════
 
     private var windowManager: WindowManager? = null
     private var overlayView: FrameLayout? = null
@@ -148,8 +172,6 @@ class AppWatcherService : AccessibilityService() {
                 setPadding(40, 40, 40, 40)
             }
             addView(textView)
-
-            setOnClickListener { engageAllDefenseLayers(currentForegroundPackage) }
         }
 
         overlayLayoutParams = WindowManager.LayoutParams(
@@ -203,6 +225,10 @@ class AppWatcherService : AccessibilityService() {
         isOverlayShowing = false
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    //  Service Lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         _isRunning = true
@@ -221,11 +247,13 @@ class AppWatcherService : AccessibilityService() {
 
         createOverlay()
 
-        // Always start monitoring — the loop checks for blocked apps every 300ms
+        // Always start monitoring — the loop handles blocked app detection
         startMonitoring()
+
+        // Force-check in case a blocked app is already open
         handler.postDelayed({ forceCheckAndKick() }, 300L)
 
-        Log.i(TAG, "AppWatcher connected — dual mechanism (events + 300ms polling)")
+        Log.i(TAG, "AppWatcher connected — accessibility events + 500ms polling")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -247,15 +275,15 @@ class AppWatcherService : AccessibilityService() {
             hideOverlay()
             return
         }
-        if (isLauncher(packageName)) {
+        if (isLauncherCached(packageName)) {
             hideOverlay()
             return
         }
 
         if (!isBlocked(packageName)) return
 
-        Log.w(TAG, "Event: BLOCKED $packageName detected — engaging!")
-        engageAllDefenseLayers(packageName)
+        // Accessibility event detected blocked app — kick with cooldown
+        kickWithCooldown(packageName)
     }
 
     private fun checkAllVisibleWindows() {
@@ -263,9 +291,9 @@ class AppWatcherService : AccessibilityService() {
             val wins = windows ?: return
             for (window in wins) {
                 val pkg = window.root?.packageName?.toString() ?: continue
-                if (pkg.isNotEmpty() && !pkg.startsWith("cz.julek.rails") && !isLauncher(pkg) && isBlocked(pkg)) {
-                    Log.w(TAG, "WindowsChanged: BLOCKED $pkg visible (split-screen?) — engaging!")
-                    engageAllDefenseLayers(pkg)
+                if (pkg.isNotEmpty() && !pkg.startsWith("cz.julek.rails") &&
+                    !isLauncherCached(pkg) && isBlocked(pkg)) {
+                    kickWithCooldown(pkg)
                     return
                 }
             }
@@ -273,6 +301,10 @@ class AppWatcherService : AccessibilityService() {
             Log.e(TAG, "checkAllVisibleWindows failed: ${e.message}")
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Foreground Detection (UsageStatsManager)
+    // ═══════════════════════════════════════════════════════════════════
 
     private fun getForegroundAppViaUsageStats(): String? {
         return try {
@@ -298,33 +330,47 @@ class AppWatcherService : AccessibilityService() {
         }
     }
 
-    private fun engageAllDefenseLayers(packageName: String) {
+    // ═══════════════════════════════════════════════════════════════════
+    //  THE KEY METHOD: Kick with Cooldown
+    //
+    //  This is the ONLY method that performs the kick.
+    //  Both accessibility events and the monitoring loop call this.
+    //  The cooldown prevents callback storms that killed the service.
+    // ═══════════════════════════════════════════════════════════════════
+
+    private fun kickWithCooldown(packageName: String, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+
+        // Cooldown check — prevents flooding the handler queue
+        if (!force && (now - lastKickTime < KICK_COOLDOWN_MS)) {
+            return
+        }
+        lastKickTime = now
+
         val appName = FirebaseManager.getFriendlyAppName(packageName)
+        Log.w(TAG, "KICKING $appName ($packageName)")
 
-        val globalResult = performGlobalAction(GLOBAL_ACTION_HOME)
-        Log.d(TAG, "  Layer 1: performGlobalAction(HOME) = $globalResult")
+        // Layer 1: System-level home action
+        val homeResult = performGlobalAction(GLOBAL_ACTION_HOME)
+        Log.d(TAG, "  Layer 1: GLOBAL_ACTION_HOME = $homeResult")
 
+        // Layer 2: Home intent (dual kick — some devices ignore one but not the other)
         goToHomeScreen()
+
+        // Layer 3: Overlay barrier
         showOverlay(appName)
+
+        // Layer 4: Broadcast notification
         notifyBlocked(appName)
 
-        // Exponential re-checks — pass packageName as snapshot, NOT currentForegroundPackage
-        scheduleRecheck(packageName, 300L)
-        scheduleRecheck(packageName, 700L)
-        scheduleRecheck(packageName, 1500L)
-        scheduleRecheck(packageName, 3000L)
-        scheduleRecheck(packageName, 6000L)
-
-        // Auto-hide overlay only when blocked app is actually gone
-        handler.postDelayed({
-            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
-            if (!isBlocked(realFg) || isLauncher(realFg)) {
-                hideOverlay()
-            }
-        }, 3500L)
-
-        if (!isMonitoring) startMonitoring()
+        // NO scheduleRecheck! The monitoring loop IS the recheck.
+        // It runs every 500ms and will naturally detect if the blocked app
+        // is still in foreground and kick again (after cooldown expires).
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Blocked App Detection
+    // ═══════════════════════════════════════════════════════════════════
 
     fun isBlocked(packageName: String): Boolean {
         val firebaseBlocked = FirebaseManager.blockedApps.value
@@ -346,63 +392,32 @@ class AppWatcherService : AccessibilityService() {
                 packageName.contains(blockedApp, ignoreCase = true)
     }
 
-    override fun onInterrupt() {}
+    // ═══════════════════════════════════════════════════════════════════
+    //  Launcher Detection — Dynamic with Cache
+    //
+    //  Uses PackageManager to detect ANY launcher on the device,
+    //  including custom launchers (Nova, Niagara, Lawnchair, KISS, etc.)
+    //  Results are cached to avoid querying PackageManager every 500ms.
+    // ═══════════════════════════════════════════════════════════════════
 
-    override fun onDestroy() {
-        super.onDestroy()
-        _isRunning = false
-        instance = null
-        stopMonitoring()
-        handler.removeCallbacksAndMessages(null)
-        removeOverlay()
-        Log.i(TAG, "AppWatcher destroyed")
-    }
-
-    fun goToHomeScreen() {
-        try {
-            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-            }
-            startActivity(homeIntent)
-        } catch (e: Exception) {
-            Log.e(TAG, "goToHomeScreen failed: ${e.message}")
+    private fun isLauncherCached(packageName: String): Boolean {
+        // Check cache first
+        cachedLauncherPackages?.let { cached ->
+            return cached.contains(packageName)
         }
+
+        // Build cache
+        val launchers = detectLaunchers()
+        cachedLauncherPackages = launchers
+        Log.i(TAG, "Launcher cache built: $launchers")
+        return launchers.contains(packageName)
     }
 
-    /**
-     * FIX: Uses getForegroundAppViaUsageStats() to check the REAL current foreground,
-     * NOT currentForegroundPackage (which was already the launcher by the time this runs).
-     */
-    private fun scheduleRecheck(blockedPackage: String, delayMs: Long) {
-        handler.postDelayed({
-            if (!isBlocked(blockedPackage)) return@postDelayed
+    private fun detectLaunchers(): Set<String> {
+        val launchers = mutableSetOf<String>()
 
-            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
-
-            if (realFg == blockedPackage || matchesBlocked(realFg, blockedPackage)) {
-                Log.w(TAG, "Recheck @${delayMs}ms: $blockedPackage STILL foreground — kicking again!")
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                goToHomeScreen()
-                showOverlay(FirebaseManager.getFriendlyAppName(blockedPackage))
-            }
-        }, delayMs)
-    }
-
-    private fun notifyBlocked(appName: String) {
-        val intent = Intent("cz.julek.rails.ACTION_APP_BLOCKED").apply {
-            putExtra("app_name", appName)
-            setPackage("cz.julek.rails")
-        }
-        sendBroadcast(intent)
-    }
-
-    /**
-     * FIX: Dynamic launcher detection via PackageManager.
-     * Works with Nova Launcher, Action Launcher, any 3rd-party launcher.
-     */
-    fun isLauncher(packageName: String): Boolean {
-        val knownLaunchers = setOf(
+        // 1. Hardcoded known launchers (instant, no query needed)
+        launchers.addAll(setOf(
             "com.google.android.apps.nexuslauncher",
             "com.android.launcher3",
             "com.android.launcher",
@@ -416,20 +431,75 @@ class AppWatcherService : AccessibilityService() {
             "com.sonyericsson.home",
             "com.lge.launcher2",
             "com.android.systemui",
-            "com.teslacoilsw.launcher",
-            "com.actionlauncher.playstore",
+            "com.teslacoilsw.launcher",           // Nova Launcher
+            "com.actionlauncher.playstore",        // Action Launcher
             "net.oneplus.launcher",
             "com.google.android.launcher",
-            "com.microsoft.launcher",
-        )
-        if (knownLaunchers.contains(packageName)) return true
+            "com.microsoft.launcher",              // Microsoft Launcher
+            "ch.deletescape.lawnchair.ci",         // Lawnchair
+            "ch.deletescape.lawnchair",            // Lawnchair
+            "fr.neamar.kiss",                      // KISS Launcher
+            "com.nielsen.launcher",                // Niagara Launcher
+            "bitpit.launcher",                     // Niagara Launcher
+            "com.slim.launcher",                   // Slim Launcher
+            "com.bbh.scenes",                      // ASAP Launcher
+            "com.catchingnow.iceboxapp",           // Ice Box
+            "me.craftsapp.nano",                   // Nano Launcher
+            "org.indywidualni.fblite",             // herolife
+        ))
 
-        return try {
+        // 2. Dynamic detection via PackageManager — catches ANY launcher
+        try {
             val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
             val resolveInfos = packageManager.queryIntentActivities(homeIntent, 0)
-            resolveInfos.any { it.activityInfo.packageName == packageName }
+            for (info in resolveInfos) {
+                launchers.add(info.activityInfo.packageName)
+            }
         } catch (e: Exception) {
-            false
+            Log.w(TAG, "PackageManager launcher query failed: ${e.message}")
         }
+
+        return launchers
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Kick Helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    fun goToHomeScreen() {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(homeIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "goToHomeScreen failed: ${e.message}")
+        }
+    }
+
+    private fun notifyBlocked(appName: String) {
+        val intent = Intent("cz.julek.rails.ACTION_APP_BLOCKED").apply {
+            putExtra("app_name", appName)
+            setPackage("cz.julek.rails")
+        }
+        sendBroadcast(intent)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    override fun onInterrupt() {}
+
+    override fun onDestroy() {
+        super.onDestroy()
+        _isRunning = false
+        instance = null
+        stopMonitoring()
+        handler.removeCallbacksAndMessages(null)
+        removeOverlay()
+        cachedLauncherPackages = null
+        Log.i(TAG, "AppWatcher destroyed")
     }
 }
