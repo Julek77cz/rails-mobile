@@ -280,11 +280,11 @@ object FirebaseManager {
 
                         addSystemMessage("🚫 Blokováno: ${appsList.joinToString(", ")}")
 
-                        // CRITICAL: Force-check the current foreground app.
-                        // If the blocked app is ALREADY open, no accessibility event
-                        // will fire (the app is already in the foreground).
-                        // We must actively check and kick NOW.
-                        Log.i(TAG, "Calling AppWatcherService.forceCheckAndKick() for immediate blocking")
+                        // Start continuous monitoring (500ms polling via UsageStatsManager)
+                        // This is the RELIABLE backup for accessibility events
+                        AppWatcherService.startMonitoring()
+
+                        // Force-check the current foreground app immediately
                         AppWatcherService.forceCheckAndKick()
 
                         onBlockApps?.invoke(appsList, message)
@@ -294,8 +294,9 @@ object FirebaseManager {
                         Log.i(TAG, "UNBLOCK_APPS command received: $message")
                         _blockedApps.value = emptyList()
 
-                        // Clear local persistence too
+                        // Clear local persistence and stop monitoring
                         appContext?.let { AppWatcherService.clearBlockedApps(it) }
+                        AppWatcherService.stopMonitoring()
 
                         addSystemMessage("✅ Aplikace odblokovány")
                         onUnblockApps?.invoke(message)
@@ -311,8 +312,9 @@ object FirebaseManager {
                         Log.i(TAG, "CLEAR command received")
                         _blockedApps.value = emptyList()
 
-                        // Clear local persistence too
+                        // Clear local persistence and stop monitoring
                         appContext?.let { AppWatcherService.clearBlockedApps(it) }
+                        AppWatcherService.stopMonitoring()
 
                         addSystemMessage("Intervence zrušena")
                         onClear?.invoke()
