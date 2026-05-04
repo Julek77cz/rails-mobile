@@ -101,24 +101,30 @@ class AppWatcherService : AccessibilityService() {
 
         fun startMonitoring() {
             if (isMonitoring) {
-                Log.d(TAG, "⚠️ startMonitoring called but already monitoring")
+                Log.d(TAG, "startMonitoring: already monitoring")
+                return
+            }
+            if (instance == null) {
+                // AccessibilityService is not running — SensorService handles blocking
+                Log.d(TAG, "startMonitoring: instance=null, SensorService will handle blocking")
                 return
             }
             isMonitoring = true
-            Log.i(TAG, "▶️ Starting monitor loop (every ${MONITOR_INTERVAL_MS}ms)")
+            Log.i(TAG, "Starting monitor loop (every ${MONITOR_INTERVAL_MS}ms)")
 
             monitorRunnable = object : Runnable {
                 override fun run() {
                     if (!isMonitoring) {
-                        Log.w(TAG, "🛑 Monitor loop stopped — isMonitoring=false")
+                        Log.w(TAG, "Monitor loop stopped — isMonitoring=false")
                         return
                     }
 
                     try {
                         val svc = instance
                         if (svc == null) {
-                            Log.w(TAG, "⚠️ Monitor: instance=null, retrying in 1.5s")
-                            handler.postDelayed(this, 1500L)
+                            // Instance became null — stop the loop, SensorService will handle it
+                            Log.w(TAG, "Monitor: instance=null, stopping (SensorService handles blocking)")
+                            isMonitoring = false
                             return
                         }
 
@@ -135,7 +141,7 @@ class AppWatcherService : AccessibilityService() {
 
                             if (!isOwn && !isLaunch && blocked) {
                                 val appName = FirebaseManager.getFriendlyAppName(fg)
-                                Log.w(TAG, "🔴 Monitor: BLOCKED $appName ($fg) — kicking!")
+                                Log.w(TAG, "Monitor: BLOCKED $appName ($fg) — kicking!")
                                 svc.kickWithCooldown(fg)
                             }
                         }
@@ -143,8 +149,7 @@ class AppWatcherService : AccessibilityService() {
                         handler.postDelayed(this, MONITOR_INTERVAL_MS)
 
                     } catch (e: Exception) {
-                        Log.e(TAG, "💥 Monitor loop CRASHED: ${e.message}", e)
-                        // Self-heal: restart the loop after a delay
+                        Log.e(TAG, "Monitor loop CRASHED: ${e.message}", e)
                         handler.postDelayed(this, 2000L)
                     }
                 }
@@ -163,27 +168,28 @@ class AppWatcherService : AccessibilityService() {
         fun forceCheckAndKick() {
             val svc = instance
             if (svc == null) {
-                Log.e(TAG, "❌ forceCheckAndKick: instance=null! Service not running!")
+                // Not running — SensorService handles blocking as primary blocker
+                Log.d(TAG, "forceCheckAndKick: instance=null, SensorService will handle")
                 return
             }
 
             val fg = svc.getForegroundAppViaUsageStats() ?: currentForegroundPackage
             if (fg.isEmpty()) {
-                Log.w(TAG, "⚠️ forceCheckAndKick: fg is empty")
+                Log.w(TAG, "forceCheckAndKick: fg is empty")
                 return
             }
 
             currentForegroundPackage = fg
-            Log.i(TAG, "🔄 forceCheckAndKick: fg=$fg, isLauncher=${svc.isLauncher(fg)}, isBlocked=${svc.isBlocked(fg)}")
+            Log.i(TAG, "forceCheckAndKick: fg=$fg, isLauncher=${svc.isLauncher(fg)}, isBlocked=${svc.isBlocked(fg)}")
 
             if (fg.startsWith("cz.julek.rails") || svc.isLauncher(fg)) return
 
             if (svc.isBlocked(fg)) {
                 val appName = FirebaseManager.getFriendlyAppName(fg)
-                Log.w(TAG, "🔴 forceCheckAndKick: BLOCKED $appName ($fg) — kicking!")
+                Log.w(TAG, "forceCheckAndKick: BLOCKED $appName ($fg) — kicking!")
                 svc.kickWithCooldown(fg, force = true)
             } else {
-                Log.i(TAG, "✅ forceCheckAndKick: $fg is NOT blocked")
+                Log.i(TAG, "forceCheckAndKick: $fg is NOT blocked")
             }
         }
     }
@@ -551,6 +557,8 @@ class AppWatcherService : AccessibilityService() {
             "net.oneplus.launcher",
             "com.google.android.launcher",
             "com.microsoft.launcher",
+            "ginlemon.flowerfree",       // Hola Launcher / Flower Free
+            "ginlemon.launcher",         // Hola Launcher variant
         )
         if (knownLaunchers.contains(packageName)) return true
 

@@ -13,6 +13,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.BatteryManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
@@ -24,42 +25,55 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 /**
- * Rails Sensor Service — Foreground Service (Phase 2+3)
+ * Rails Sensor Service — Foreground Service (PRIMARY BLOCKER)
  *
- * Runs continuously and collects:
- *   1. Screen on/off state (via BroadcastReceiver + PowerManager)
- *   2. Device locked/unlocked state (via KeyguardManager + USER_PRESENT broadcast)
- *   3. Foreground app name (via UsageStatsManager)
- *   4. Battery level (via BatteryManager) — Phase 3
+ * Runs continuously and:
+ *   1. Collects sensor data (screen, lock, foreground app, battery)
+ *   2. Sends state to Firebase for the Orchestrator
+ *   3. BLOCKS apps when BLOCK_APPS command is received (500ms polling)
  *
- * Sends changes to the Orchestrator via FirebaseManager (Firebase RTDB):
- *   Path: /rails/devices/my_phone/phone_state
- *   Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false,
- *              "timestamp": ..., "battery_level": 85, "notifications": [], "screen_text": "" }
+ * ARCHITECTURE:
+ *   - SensorService is the PRIMARY blocker — uses UsageStatsManager polling
+ *   - AppWatcherService is the OPTIONAL fast-path — uses AccessibilityService events
+ *   - Blocking works regardless of whether AppWatcherService is enabled
  *
- * Also monitors blocked apps (from FirebaseManager.blockedApps) and triggers
- * overlay when a blocked app becomes the foreground app.
+ * BLOCKING FLOW:
+ *   1. BLOCK_APPS command → FirebaseManager → onBlockApps callback
+ *   2. SensorService starts a 500ms polling monitor
+ *   3. On each poll: getForegroundApp() → isBlockedApp() → kickToHomeScreen()
+ *   4. Continues until UNBLOCK_APPS is received
+ *   5. On app restart: loads persisted blocked apps from SharedPreferences
  */
 class SensorService : Service() {
 
     companion object {
         const val TAG = "Rails/Sensor"
         const val CHANNEL_ID = "rails_sensor"
-        const val CHANNEL_ID_ALERTS = "rails_alerts"  // High-priority for interventions
-        const val CHANNEL_ID_CHAT = "rails_chat"    // Chat messages from AI
-        const val CHANNEL_ID_BLOCK = "rails_block"  // App blocking notifications
+        const val CHANNEL_ID_ALERTS = "rails_alerts"
+        const val CHANNEL_ID_CHAT = "rails_chat"
+        const val CHANNEL_ID_BLOCK = "rails_block"
         const val NOTIFICATION_ID = 1001
         const val BLOCK_NOTIFICATION_ID = 3001
 
         const val ACTION_START = "cz.julek.rails.action.START_SENSOR"
         const val ACTION_STOP = "cz.julek.rails.action.STOP_SENSOR"
 
-        // How often to poll UsageStats for foreground app (seconds)
+        // Normal polling interval (seconds) — for state reporting
         private const val POLL_INTERVAL_S = 3L
 
-        // How often to report battery level (seconds) — less frequent than app polling
+        // Battery polling interval (seconds)
         private const val BATTERY_INTERVAL_S = 60L
+
+        // Blocking monitor interval (milliseconds) — fast polling for app blocking
+        private const val BLOCK_POLL_INTERVAL_MS = 500L
+
+        // Cooldown between kicks to avoid spam
+        private const val KICK_COOLDOWN_MS = 800L
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  State
+    // ═══════════════════════════════════════════════════════════════════
 
     private var screenReceiver: ScreenReceiver? = null
     private var isScreenOn: Boolean = false
@@ -68,9 +82,17 @@ class SensorService : Service() {
     private var lastBatteryLevel: Int? = null
     private var scheduler: ScheduledExecutorService? = null
     private var wakeLock: PowerManager.WakeLock? = null
-
-    // Block notification tracking (AppWatcherService handles the actual kicking)
     private var isBlockNotificationShown: Boolean = false
+
+    // ── Blocking state ──
+    private var activeBlockedApps: List<String> = emptyList()
+    private var isBlocking: Boolean = false
+    private var blockScheduler: ScheduledExecutorService? = null
+    private var lastKickTime: Long = 0
+    private var kickCount: Int = 0
+
+    // ── Launcher detection cache ──
+    private var cachedLauncherPackages: Set<String>? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -110,24 +132,25 @@ class SensorService : Service() {
         createChatNotificationChannel()
         createBlockNotificationChannel()
 
-        // Start foreground notification — MUST specify foregroundServiceType on Android 14+ (API 34)
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        // Start foreground notification — use specialUse on Android 14+ to avoid
+        // the 6-hour dataSync timeout that causes ForegroundServiceDidNotStopInTimeException
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
                 buildNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             )
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
 
-        // Connect to Firebase — pass context so it can persist blocked apps locally
+        // Connect to Firebase
         FirebaseManager.connect(this)
 
-        // Register Firebase command callbacks (includes intervention notifications)
+        // Register Firebase command callbacks
         registerFirebaseCallbacks()
 
-        // ── Detect initial screen state (REAL, not static) ──
+        // ── Detect initial screen state ──
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         isScreenOn = powerManager.isInteractive
         Log.i(TAG, "Initial screen state: isScreenOn=$isScreenOn (PowerManager.isInteractive)")
@@ -160,12 +183,32 @@ class SensorService : Service() {
         // Start periodic foreground app polling
         startAppPolling()
 
+        // ── Restore blocking from persisted state ──
+        // If the app was killed and restarted while blocking was active,
+        // we need to resume blocking from SharedPreferences
+        val persistedBlocked = AppWatcherService.loadBlockedApps(this).toList()
+        if (persistedBlocked.isNotEmpty()) {
+            activeBlockedApps = persistedBlocked
+            isBlocking = true
+            startBlockingMonitor()
+            Log.i(TAG, "Restored ${persistedBlocked.size} blocked apps from persistence: $persistedBlocked")
+
+            // Also sync with Firebase's current state
+            val firebaseBlocked = FirebaseManager.blockedApps.value
+            if (firebaseBlocked.isNotEmpty()) {
+                activeBlockedApps = firebaseBlocked
+            }
+        }
+
         // Send initial state
         sendCurrentState()
     }
 
     private fun stopSensor() {
         Log.i(TAG, "Stopping sensor service")
+
+        // Stop blocking monitor
+        stopBlockingMonitor()
 
         // Stop polling
         scheduler?.shutdownNow()
@@ -181,10 +224,18 @@ class SensorService : Service() {
 
         // Disconnect from Firebase
         FirebaseManager.disconnect()
+
+        // Properly stop foreground to avoid ForegroundServiceDidNotStopInTimeException
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Firebase Command Callbacks (Phase 2)
+    //  Firebase Command Callbacks
     // ═══════════════════════════════════════════════════════════════════
 
     private fun registerFirebaseCallbacks() {
@@ -194,77 +245,49 @@ class SensorService : Service() {
             showInterventionNotification(message)
         }
 
-        // CHAT MESSAGE — show notification when AI responds (user may be outside app)
+        // CHAT MESSAGE — show notification when AI responds
         FirebaseManager.onChatMessage = { text ->
             Log.i(TAG, "Chat message callback: ${text.substring(0, minOf(60, text.length))}")
             showChatNotification(text)
         }
 
-        // BLOCK_APPS — show notification + FALLBACK kick (if AppWatcherService isn't running)
+        // BLOCK_APPS — PRIMARY BLOCKING: start 500ms polling monitor
         FirebaseManager.onBlockApps = { apps, message ->
-            Log.w(TAG, "BLOCK_APPS callback: apps=$apps message=$message")
+            Log.w(TAG, "BLOCK_APPS callback: apps=$apps — starting blocking monitor")
 
-            // Show a block notification immediately
+            // Update blocking state
+            activeBlockedApps = apps
+            isBlocking = true
+            kickCount = 0
+
+            // Start the fast polling monitor
+            startBlockingMonitor()
+
+            // Show block notification
             val currentApp = lastForegroundApp
-            if (currentApp.isNotEmpty()) {
-                val isBlocked = apps.any { blockedApp ->
-                    currentApp.equals(blockedApp, ignoreCase = true) ||
-                    FirebaseManager.getFriendlyAppName(currentApp).equals(blockedApp, ignoreCase = true) ||
-                    currentApp.contains(blockedApp, ignoreCase = true)
-                }
-                if (isBlocked) {
-                    val appName = FirebaseManager.getFriendlyAppName(currentApp)
-                    showBlockNotification(appName)
-                    isBlockNotificationShown = true
+            if (currentApp.isNotEmpty() && isBlockedApp(currentApp)) {
+                val appName = FirebaseManager.getFriendlyAppName(currentApp)
+                showBlockNotification(appName)
+                isBlockNotificationShown = true
 
-                    // FALLBACK: If AppWatcherService is NOT running, we kick directly
-                    // from here. This handles the case where the user hasn't enabled
-                    // the Accessibility Service in Settings.
-                    if (!AppWatcherService.isRunning) {
-                        Log.w(TAG, "AppWatcherService NOT running — SensorService fallback kick!")
-                        kickToHomeScreen()
-
-                        // Schedule re-checks as fallback
-                        scheduler?.schedule({
-                            try {
-                                val fg = getForegroundApp()
-                                if (fg != null && fg == currentApp) {
-                                    val stillBlocked = apps.any { blockedApp ->
-                                        fg.equals(blockedApp, ignoreCase = true) ||
-                                        FirebaseManager.getFriendlyAppName(fg).equals(blockedApp, ignoreCase = true) ||
-                                        fg.contains(blockedApp, ignoreCase = true)
-                                    }
-                                    if (stillBlocked) {
-                                        Log.w(TAG, "FALLBACK: blocked app still in foreground — kicking again")
-                                        kickToHomeScreen()
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Fallback recheck error: ${e.message}")
-                            }
-                        }, 1, TimeUnit.SECONDS)
-
-                        scheduler?.schedule({
-                            try {
-                                val fg = getForegroundApp()
-                                if (fg != null && fg == currentApp) {
-                                    Log.w(TAG, "FALLBACK: blocked app STILL in foreground after 3s — kicking again")
-                                    kickToHomeScreen()
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "Fallback recheck error: ${e.message}")
-                            }
-                        }, 3, TimeUnit.SECONDS)
-                    }
-                }
+                // Immediate kick — don't wait for the next poll
+                kickToHomeScreen()
+                kickCount++
+                Log.w(TAG, "Immediate kick #$kickCount: $appName was in foreground")
+            } else {
+                // Show generic block notification
+                val appNames = apps.map { FirebaseManager.getFriendlyAppName(it) }
+                showBlockNotification(appNames.joinToString(", "))
+                isBlockNotificationShown = true
             }
         }
 
-        // UNBLOCK_APPS — cancel block notification
+        // UNBLOCK_APPS — stop blocking monitor
         FirebaseManager.onUnblockApps = { message ->
             Log.i(TAG, "UNBLOCK_APPS callback: $message")
             isBlockNotificationShown = false
             cancelBlockNotification()
+            stopBlockingMonitor()
         }
 
         // LOCK_SCREEN — show lock-style overlay
@@ -278,11 +301,156 @@ class SensorService : Service() {
             Log.i(TAG, "CLEAR callback")
             isBlockNotificationShown = false
             cancelBlockNotification()
+            stopBlockingMonitor()
         }
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Screen State + Lock Detection (REAL values)
+    //  App Blocking — PRIMARY (does NOT require AccessibilityService)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * Check if a package name matches any of the currently blocked apps.
+     * Supports matching by:
+     *   - Exact package name (e.g., "com.instagram.android")
+     *   - Friendly name (e.g., "Instagram")
+     *   - Substring contains (e.g., "instagram" matches "com.instagram.android")
+     */
+    private fun isBlockedApp(packageName: String): Boolean {
+        if (activeBlockedApps.isEmpty()) return false
+        return activeBlockedApps.any { blocked ->
+            packageName.equals(blocked, ignoreCase = true) ||
+            FirebaseManager.getFriendlyAppName(packageName).equals(blocked, ignoreCase = true) ||
+            packageName.contains(blocked, ignoreCase = true)
+        }
+    }
+
+    /**
+     * Check if a package is a home screen launcher.
+     * Uses a hardcoded list of known launchers + dynamic PackageManager query.
+     * Results are cached for performance.
+     */
+    private fun isLauncher(packageName: String): Boolean {
+        // Hardcoded list of known launchers
+        val knownLaunchers = setOf(
+            "com.google.android.apps.nexuslauncher",
+            "com.android.launcher3",
+            "com.android.launcher",
+            "com.sec.android.app.launcher",
+            "com.huawei.android.launcher",
+            "com.miui.home",
+            "com.oppo.launcher",
+            "com.vivo.abe",
+            "com.nothing.launcher",
+            "com.oneplus.launcher",
+            "com.sonyericsson.home",
+            "com.lge.launcher2",
+            "com.android.systemui",
+            "com.teslacoilsw.launcher",
+            "com.actionlauncher.playstore",
+            "net.oneplus.launcher",
+            "com.google.android.launcher",
+            "com.microsoft.launcher",
+            "ginlemon.flowerfree",       // Hola Launcher / Flower Free
+            "ginlemon.launcher",         // Hola Launcher variant
+        )
+        if (knownLaunchers.contains(packageName)) return true
+
+        // Dynamic check via PackageManager (with caching)
+        cachedLauncherPackages?.let { cached ->
+            return cached.contains(packageName)
+        }
+
+        return try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val resolveInfos = packageManager.queryIntentActivities(homeIntent, 0)
+            val launchers = resolveInfos.map { it.activityInfo.packageName }.toSet()
+            cachedLauncherPackages = launchers
+            launchers.contains(packageName)
+        } catch (e: Exception) {
+            Log.e(TAG, "isLauncher query failed: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Start the blocking monitor — polls foreground app every 500ms.
+     * If a blocked app is detected, kicks user to home screen.
+     * Continues until stopBlockingMonitor() is called.
+     */
+    private fun startBlockingMonitor() {
+        // Stop any existing monitor first
+        blockScheduler?.shutdownNow()
+        blockScheduler = Executors.newSingleThreadScheduledExecutor()
+
+        Log.i(TAG, "Blocking monitor started — polling every ${BLOCK_POLL_INTERVAL_MS}ms, " +
+                "watching: ${activeBlockedApps.map { FirebaseManager.getFriendlyAppName(it) }}")
+
+        blockScheduler?.scheduleAtFixedRate({
+            try {
+                if (!isBlocking) return@scheduleAtFixedRate
+
+                val fg = getForegroundApp() ?: return@scheduleAtFixedRate
+
+                // Skip our own app
+                if (fg.startsWith("cz.julek.rails")) return@scheduleAtFixedRate
+
+                // Skip launchers (user is on home screen)
+                if (isLauncher(fg)) return@scheduleAtFixedRate
+
+                // Check if this is a blocked app
+                if (isBlockedApp(fg)) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastKickTime > KICK_COOLDOWN_MS) {
+                        lastKickTime = now
+                        kickCount++
+                        val appName = FirebaseManager.getFriendlyAppName(fg)
+                        Log.w(TAG, "BLOCKED: $appName ($fg) — kicking to home! (kick #$kickCount)")
+                        kickToHomeScreen()
+
+                        // Update block notification with current app name
+                        showBlockNotification(appName)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Blocking monitor error: ${e.message}")
+            }
+        }, 0, BLOCK_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /**
+     * Stop the blocking monitor and clear blocking state.
+     */
+    private fun stopBlockingMonitor() {
+        if (!isBlocking && blockScheduler == null) return
+        blockScheduler?.shutdownNow()
+        blockScheduler = null
+        isBlocking = false
+        activeBlockedApps = emptyList()
+        kickCount = 0
+        Log.i(TAG, "Blocking monitor stopped")
+    }
+
+    /**
+     * Kick user to home screen using a HOME intent.
+     * This is the primary blocking mechanism — works from any Service
+     * (no AccessibilityService required).
+     */
+    private fun kickToHomeScreen() {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(homeIntent)
+            Log.i(TAG, "Kick: user sent to home screen")
+        } catch (e: Exception) {
+            Log.e(TAG, "Kick failed: ${e.message}")
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Screen State + Lock Detection
     // ═══════════════════════════════════════════════════════════════════
 
     private fun registerScreenReceiver() {
@@ -291,13 +459,13 @@ class SensorService : Service() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)  // User unlocked the device
-            addAction(Intent.ACTION_BATTERY_CHANGED) // Battery level changes
+            addAction(Intent.ACTION_USER_PRESENT)
+            addAction(Intent.ACTION_BATTERY_CHANGED)
         }
 
         registerReceiver(screenReceiver, filter)
 
-        // Callback from ScreenReceiver — receives BOTH screen state AND lock state
+        // Callback from ScreenReceiver
         ScreenReceiver.onScreenEvent = { screenOn, deviceLocked ->
             val screenChanged = isScreenOn != screenOn
             val lockChanged = isDeviceLocked != deviceLocked
@@ -308,21 +476,12 @@ class SensorService : Service() {
             Log.i(TAG, "State changed: isScreenOn=$isScreenOn, isDeviceLocked=$isDeviceLocked " +
                     "(screenChanged=$screenChanged, lockChanged=$lockChanged)")
 
-            // Send update if anything changed
             if (screenChanged || lockChanged) {
                 sendCurrentState()
             }
-
-            // If screen turned on and unlocked, AppWatcherService will
-            // handle blocking automatically via Accessibility events
         }
     }
 
-    /**
-     * Double-check screen state using PowerManager AND lock state using
-     * KeyguardManager before sending. This ensures we never send stale
-     * data — always the REAL current state from the system APIs.
-     */
     private fun refreshScreenState() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -332,7 +491,6 @@ class SensorService : Service() {
                 isScreenOn = realScreenOn
             }
 
-            // Also re-verify lock state if screen is on
             if (isScreenOn) {
                 val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
                 val realLocked = keyguardManager.isDeviceLocked
@@ -355,10 +513,10 @@ class SensorService : Service() {
 
         scheduler?.scheduleAtFixedRate({
             try {
-                // Renew wake lock in the polling loop
+                // Renew wake lock
                 wakeLock?.let {
                     if (it.isHeld) {
-                        it.acquire(4 * 60 * 60 * 1000L) // Renew for another 4 hours
+                        it.acquire(4 * 60 * 60 * 1000L)
                     }
                 }
 
@@ -376,24 +534,19 @@ class SensorService : Service() {
                     lastForegroundApp = currentApp
                     Log.d(TAG, "Foreground app changed: $currentApp")
                     sendCurrentState()
-
-                    // Blocking is handled by AppWatcherService (AccessibilityService)
-                    // which detects app switches instantly — no polling needed
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "App polling error: ${e.message}")
             }
         }, POLL_INTERVAL_S, POLL_INTERVAL_S, TimeUnit.SECONDS)
 
-        // Battery level polling (less frequent)
+        // Battery level polling
         scheduler?.scheduleAtFixedRate({
             try {
                 val currentLevel = getBatteryLevel()
                 if (currentLevel != null && currentLevel != lastBatteryLevel) {
                     lastBatteryLevel = currentLevel
                     Log.d(TAG, "Battery level changed: $currentLevel%")
-                    // Send state update with new battery info
-                    // (only if something else also changed, to avoid excessive Firebase writes)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Battery polling error: ${e.message}")
@@ -428,37 +581,9 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Fallback Kick — used when AppWatcherService isn't running
+    //  Battery Level
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * Kick user to home screen.
-     * This is a FALLBACK for when AppWatcherService (AccessibilityService)
-     * is not running (e.g., user didn't enable it in Accessibility Settings).
-     * AppWatcherService uses performGlobalAction(GLOBAL_ACTION_HOME) which
-     * is more reliable, but this works as a backup.
-     */
-    private fun kickToHomeScreen() {
-        try {
-            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-            }
-            startActivity(homeIntent)
-            Log.i(TAG, "Fallback kick: user sent to home screen")
-        } catch (e: Exception) {
-            Log.e(TAG, "Fallback kick failed: ${e.message}")
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  Battery Level (Phase 3)
-    // ═══════════════════════════════════════════════════════════════════
-
-    /**
-     * Get current battery level as a percentage (0-100).
-     * Uses BatteryManager which doesn't require a sticky broadcast.
-     */
     private fun getBatteryLevel(): Int? {
         return try {
             val batteryManager = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
@@ -470,22 +595,12 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Blocked Apps — Notification only (kicking handled by AppWatcherService)
-    // ═══════════════════════════════════════════════════════════════════
-
-    // Note: The actual home-screen kick is done by AppWatcherService
-    // (AccessibilityService), which detects app switches instantly.
-    // SensorService only shows/cancels the block notification.
-
-    // ═══════════════════════════════════════════════════════════════════
-    //  Overlay Service Control (Phase 2)
+    //  Overlay Service Control
     // ═══════════════════════════════════════════════════════════════════
 
     private fun startOverlayService(type: String, message: String) {
-        // Check overlay permission before attempting to show
         if (!android.provider.Settings.canDrawOverlays(this)) {
-            Log.e(TAG, "Cannot show overlay — SYSTEM_ALERT_WINDOW permission not granted! " +
-                    "User must enable it in Settings > Apps > Special access > Display over other apps")
+            Log.e(TAG, "Cannot show overlay — SYSTEM_ALERT_WINDOW permission not granted!")
             return
         }
 
@@ -509,35 +624,20 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Send State to Orchestrator via Firebase (Phase 3 — extended)
+    //  Send State to Firebase
     // ═══════════════════════════════════════════════════════════════════
 
-    /**
-     * Send the current phone state to the Orchestrator via Firebase.
-     *
-     * Before sending, we double-check the screen state using PowerManager
-     * to ensure we never send stale/incorrect data.
-     *
-     * Firebase path: /rails/devices/my_phone/phone_state
-     * Payload: { "screen_on": true, "app": "...", "app_name": "...", "device_locked": false,
-     *            "timestamp": ..., "battery_level": 85 }
-     */
     private fun sendCurrentState() {
-        // Refresh screen state from PowerManager (ensure REAL value)
         refreshScreenState()
 
-        // Determine app based on screen + lock state
         val app = when {
-            !isScreenOn -> ""                    // Screen off → no app
-            isDeviceLocked -> ""                 // Locked → keyguard is showing
-            else -> lastForegroundApp            // Unlocked → real foreground app
+            !isScreenOn -> ""
+            isDeviceLocked -> ""
+            else -> lastForegroundApp
         }
 
-        // Determine device_locked:
-        // If screen is off, device is implicitly locked
         val effectiveLocked = isDeviceLocked || !isScreenOn
 
-        // Send via Firebase (with Phase 3 battery level)
         FirebaseManager.sendState(
             screenOn = isScreenOn,
             foregroundApp = app,
@@ -550,7 +650,7 @@ class SensorService : Service() {
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    //  Notification
+    //  Notifications
     // ═══════════════════════════════════════════════════════════════════
 
     private fun createNotificationChannel() {
@@ -566,21 +666,17 @@ class SensorService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    /**
-     * High-priority notification channel for AI interventions.
-     * This channel WILL buzz, vibrate, and show as heads-up notification.
-     */
     private fun createAlertNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID_ALERTS,
             "Rails Intervence",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "AI varování a intervence při prokrastinaci"
+            description = "AI varovani a intervence pri prokrastinaci"
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 300, 100, 300)
             enableLights(true)
-            lightColor = 0xFFFF6F00.toInt()  // Amber
+            lightColor = 0xFFFF6F00.toInt()
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
@@ -588,22 +684,17 @@ class SensorService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    /**
-     * Notification channel for AI chat responses.
-     * Uses IMPORTANCE_HIGH so it makes sound, vibrates, and shows as heads-up.
-     * The user sees these when the AI replies while the app is in the background.
-     */
     private fun createChatNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID_CHAT,
             "Rails Chat",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Zprávy od AI asistenta"
+            description = "Zpravy od AI asistenta"
             enableVibration(true)
             vibrationPattern = longArrayOf(0, 150, 100, 150)
             enableLights(true)
-            lightColor = 0xFF1976D2.toInt()  // Blue
+            lightColor = 0xFF1976D2.toInt()
             setShowBadge(true)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
@@ -611,10 +702,24 @@ class SensorService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    /**
-     * Show a high-priority notification when the AI Judge intervenes.
-     * Uses the alerts channel which has sound + vibration.
-     */
+    private fun createBlockNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID_BLOCK,
+            "Rails Blokovani",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Upozorneni pri zablokovani aplikace"
+            enableVibration(true)
+            vibrationPattern = longArrayOf(0, 100)
+            enableLights(true)
+            lightColor = 0xFFD32F2F.toInt()
+            setShowBadge(true)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
     private fun showInterventionNotification(message: String) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -641,11 +746,6 @@ class SensorService : Service() {
         Log.i(TAG, "Intervention notification shown: ${message.substring(0, minOf(60, message.length))}")
     }
 
-    /**
-     * Show a notification when the AI sends a chat response.
-     * Uses a separate chat channel with sound + vibration so the user
-     * is alerted even when the app is in the background.
-     */
     private fun showChatNotification(text: String) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -655,7 +755,6 @@ class SensorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Truncate for notification preview (full text in BigTextStyle)
         val previewText = if (text.length > 80) text.substring(0, 80) + "..." else text
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID_CHAT)
@@ -670,42 +769,12 @@ class SensorService : Service() {
             .build()
 
         val notificationManager = getSystemService(NotificationManager::class.java)
-        // Use a unique ID based on timestamp so multiple messages don't overwrite
         val notificationId = (System.currentTimeMillis() % 100000).toInt()
         notificationManager.notify(notificationId, notification)
 
         Log.i(TAG, "Chat notification shown: ${text.substring(0, minOf(60, text.length))}")
     }
 
-    /**
-     * Notification channel for app blocking — shown when a blocked app
-     * is detected and user is kicked to home screen.
-     * Uses IMPORTANCE_DEFAULT so it doesn't make noise every time
-     * (user gets kicked to home, notification is just the explanation).
-     */
-    private fun createBlockNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID_BLOCK,
-            "Rails Blokování",
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            description = "Upozornění při zablokování aplikace"
-            enableVibration(true)
-            vibrationPattern = longArrayOf(0, 100)
-            enableLights(true)
-            lightColor = 0xFFD32F2F.toInt()  // Red
-            setShowBadge(true)
-            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        }
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
-    }
-
-    /**
-     * Show an ongoing notification when a blocked app is detected.
-     * Stays visible until the app is unblocked — reminds the user
-     * why they were kicked to the home screen.
-     */
     private fun showBlockNotification(appName: String) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -716,12 +785,12 @@ class SensorService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID_BLOCK)
-            .setContentTitle("$appName je zablokována")
-            .setContentText("Vrať se k práci! Aplikace bude odblokována automaticky.")
+            .setContentTitle("$appName je zablokovana")
+            .setContentText("Vrat se k praci! Aplikace bude odblokovana automaticky.")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setOngoing(true)  // Cannot be swiped away — stays until unblocked
+            .setOngoing(true)
             .setContentIntent(pendingIntent)
             .build()
 
@@ -731,9 +800,6 @@ class SensorService : Service() {
         Log.i(TAG, "Block notification shown for: $appName")
     }
 
-    /**
-     * Cancel the block notification when apps are unblocked.
-     */
     private fun cancelBlockNotification() {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.cancel(BLOCK_NOTIFICATION_ID)
@@ -741,8 +807,9 @@ class SensorService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val blockingInfo = if (isBlocking) " | Blokovani aktivni" else ""
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Rails senzor aktivni")
+            .setContentTitle("Rails senzor aktivni$blockingInfo")
             .setContentText("Sleduji aktivitu a odesilam data pres Firebase")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
