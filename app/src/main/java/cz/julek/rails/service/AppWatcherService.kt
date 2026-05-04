@@ -36,8 +36,12 @@ class AppWatcherService : AccessibilityService() {
         private const val PREFS_NAME = "rails_blocked_apps"
         private const val KEY_BLOCKED_APPS = "blocked_apps_set"
         private const val MONITOR_INTERVAL_MS = 300L
+        private const val KICK_COOLDOWN_MS = 800L
 
         private var currentForegroundPackage: String = ""
+
+        // ── Cooldown: prevents callback storms that kill the service ──
+        private var lastKickTime: Long = 0
 
         private var _isRunning: Boolean = false
         val isRunning: Boolean get() = _isRunning
@@ -91,7 +95,7 @@ class AppWatcherService : AccessibilityService() {
                         if (!svc.isLauncher(fg) && !fg.startsWith("cz.julek.rails") && svc.isBlocked(fg)) {
                             val appName = FirebaseManager.getFriendlyAppName(fg)
                             Log.w(TAG, "Monitor: BLOCKED $appName ($fg) — kicking!")
-                            svc.engageAllDefenseLayers(fg)
+                            svc.kickWithCooldown(fg)
                         }
                     }
 
@@ -120,8 +124,8 @@ class AppWatcherService : AccessibilityService() {
 
             if (svc.isBlocked(fg)) {
                 val appName = FirebaseManager.getFriendlyAppName(fg)
-                Log.w(TAG, "forceCheckAndKick: BLOCKED $appName ($fg) — engaging!")
-                svc.engageAllDefenseLayers(fg)
+                Log.w(TAG, "forceCheckAndKick: BLOCKED $appName ($fg) — kicking!")
+                svc.kickWithCooldown(fg, force = true)
             }
         }
     }
@@ -149,7 +153,7 @@ class AppWatcherService : AccessibilityService() {
             }
             addView(textView)
 
-            setOnClickListener { engageAllDefenseLayers(currentForegroundPackage) }
+            setOnClickListener { kickWithCooldown(currentForegroundPackage, force = true) }
         }
 
         overlayLayoutParams = WindowManager.LayoutParams(
@@ -254,8 +258,8 @@ class AppWatcherService : AccessibilityService() {
 
         if (!isBlocked(packageName)) return
 
-        Log.w(TAG, "Event: BLOCKED $packageName detected — engaging!")
-        engageAllDefenseLayers(packageName)
+        Log.w(TAG, "Event: BLOCKED $packageName detected — kicking!")
+        kickWithCooldown(packageName)
     }
 
     private fun checkAllVisibleWindows() {
@@ -264,8 +268,8 @@ class AppWatcherService : AccessibilityService() {
             for (window in wins) {
                 val pkg = window.root?.packageName?.toString() ?: continue
                 if (pkg.isNotEmpty() && !pkg.startsWith("cz.julek.rails") && !isLauncher(pkg) && isBlocked(pkg)) {
-                    Log.w(TAG, "WindowsChanged: BLOCKED $pkg visible (split-screen?) — engaging!")
-                    engageAllDefenseLayers(pkg)
+                    Log.w(TAG, "WindowsChanged: BLOCKED $pkg visible (split-screen?) — kicking!")
+                    kickWithCooldown(pkg)
                     return
                 }
             }
@@ -298,32 +302,44 @@ class AppWatcherService : AccessibilityService() {
         }
     }
 
-    private fun engageAllDefenseLayers(packageName: String) {
-        val appName = FirebaseManager.getFriendlyAppName(packageName)
+    /**
+     * THE KEY METHOD: Kick with Cooldown
+     *
+     * Replaces engageAllDefenseLayers + scheduleRecheck.
+     * Old bug: engageAllDefenseLayers scheduled 5 rechecks, and the 300ms monitor
+     * loop also called engage → exponential callback growth → 50+ pending callbacks
+     * → Android kills the accessibility service → blocking stops after 2-3 attempts.
+     *
+     * Fix: ONE method with cooldown. The monitoring loop IS the recheck.
+     */
+    private fun kickWithCooldown(packageName: String, force: Boolean = false) {
+        val now = System.currentTimeMillis()
 
+        // Cooldown — prevents flooding the handler queue
+        if (!force && (now - lastKickTime < KICK_COOLDOWN_MS)) {
+            return
+        }
+        lastKickTime = now
+
+        val appName = FirebaseManager.getFriendlyAppName(packageName)
+        Log.w(TAG, "KICKING $appName ($packageName)")
+
+        // Layer 1: System-level home action
         val globalResult = performGlobalAction(GLOBAL_ACTION_HOME)
         Log.d(TAG, "  Layer 1: performGlobalAction(HOME) = $globalResult")
 
+        // Layer 2: Home intent (dual kick — some devices ignore one but not the other)
         goToHomeScreen()
+
+        // Layer 3: Overlay barrier
         showOverlay(appName)
+
+        // Layer 4: Broadcast notification
         notifyBlocked(appName)
 
-        // Exponential re-checks — pass packageName as snapshot, NOT currentForegroundPackage
-        scheduleRecheck(packageName, 300L)
-        scheduleRecheck(packageName, 700L)
-        scheduleRecheck(packageName, 1500L)
-        scheduleRecheck(packageName, 3000L)
-        scheduleRecheck(packageName, 6000L)
-
-        // Auto-hide overlay only when blocked app is actually gone
-        handler.postDelayed({
-            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
-            if (!isBlocked(realFg) || isLauncher(realFg)) {
-                hideOverlay()
-            }
-        }, 3500L)
-
-        if (!isMonitoring) startMonitoring()
+        // NO scheduleRecheck! The monitoring loop IS the recheck.
+        // It runs every 300ms and will naturally detect if the blocked app
+        // is still in foreground and kick again (after cooldown expires).
     }
 
     fun isBlocked(packageName: String): Boolean {
@@ -370,24 +386,8 @@ class AppWatcherService : AccessibilityService() {
         }
     }
 
-    /**
-     * FIX: Uses getForegroundAppViaUsageStats() to check the REAL current foreground,
-     * NOT currentForegroundPackage (which was already the launcher by the time this runs).
-     */
-    private fun scheduleRecheck(blockedPackage: String, delayMs: Long) {
-        handler.postDelayed({
-            if (!isBlocked(blockedPackage)) return@postDelayed
-
-            val realFg = getForegroundAppViaUsageStats() ?: currentForegroundPackage
-
-            if (realFg == blockedPackage || matchesBlocked(realFg, blockedPackage)) {
-                Log.w(TAG, "Recheck @${delayMs}ms: $blockedPackage STILL foreground — kicking again!")
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                goToHomeScreen()
-                showOverlay(FirebaseManager.getFriendlyAppName(blockedPackage))
-            }
-        }, delayMs)
-    }
+// scheduleRecheck REMOVED — was causing callback storms.
+    // The monitoring loop (300ms) handles re-checks automatically.
 
     private fun notifyBlocked(appName: String) {
         val intent = Intent("cz.julek.rails.ACTION_APP_BLOCKED").apply {
