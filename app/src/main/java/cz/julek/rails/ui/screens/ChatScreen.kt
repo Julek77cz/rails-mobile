@@ -27,6 +27,7 @@ import cz.julek.rails.network.ChatMessage
 import cz.julek.rails.network.ConnectionState
 import cz.julek.rails.network.FirebaseManager
 import cz.julek.rails.network.MessageRole
+import cz.julek.rails.util.toAnnotatedMarkdownString
 import kotlinx.coroutines.launch
 
 /**
@@ -245,7 +246,7 @@ fun MessageBubble(message: ChatMessage) {
                 color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.7f),
             ) {
                 Text(
-                    message.text,
+                    message.text.toAnnotatedMarkdownString(),
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.outline,
@@ -298,9 +299,9 @@ fun MessageBubble(message: ChatMessage) {
                     Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                // Message text
+                // Message text — parsed from Markdown for rich formatting
                 Text(
-                    text = message.text,
+                    text = message.text.toAnnotatedMarkdownString(),
                     fontSize = 14.sp,
                     lineHeight = 19.sp,
                     color = if (isUser)

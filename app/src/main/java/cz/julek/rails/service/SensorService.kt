@@ -20,6 +20,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import cz.julek.rails.MainActivity
 import cz.julek.rails.network.FirebaseManager
+import cz.julek.rails.util.parseMarkdownToSpanned
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -729,10 +730,14 @@ class SensorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Parse Markdown for rich text display in notification
+        val spannedMessage = message.parseMarkdownToSpanned()
+        val previewText = if (message.length > 80) message.substring(0, 80) + "..." else message
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID_ALERTS)
             .setContentTitle("Rails — Pozor!")
-            .setContentText(message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setContentText(spannedMessage)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(spannedMessage))
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
@@ -743,7 +748,7 @@ class SensorService : Service() {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(2001, notification)
 
-        Log.i(TAG, "Intervention notification shown: ${message.substring(0, minOf(60, message.length))}")
+        Log.i(TAG, "Intervention notification shown: ${previewText}")
     }
 
     private fun showChatNotification(text: String) {
@@ -755,12 +760,14 @@ class SensorService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Parse Markdown for rich text display in notification
+        val spannedText = text.parseMarkdownToSpanned()
         val previewText = if (text.length > 80) text.substring(0, 80) + "..." else text
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID_CHAT)
             .setContentTitle("Rails")
-            .setContentText(previewText)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentText(spannedText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(spannedText))
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)

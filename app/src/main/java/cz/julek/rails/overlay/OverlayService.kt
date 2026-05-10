@@ -13,7 +13,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.graphics.Color
 import android.graphics.Typeface
+import android.text.Spanned
 import android.view.View
+import cz.julek.rails.util.parseMarkdownToSpanned
 
 /**
  * Rails Overlay Service — App Blocking + Lock Screen (Phase 2)
@@ -137,9 +139,9 @@ class OverlayService : Service() {
                 )
             })
 
-            // Message
+            // Message — parsed from Markdown for rich text
             addView(TextView(this@OverlayService).apply {
-                text = message
+                text = message.parseMarkdownToSpanned()
                 textSize = 18f
                 setTextColor(Color.parseColor("#E0E0E0"))
                 gravity = Gravity.CENTER

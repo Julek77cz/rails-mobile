@@ -349,11 +349,12 @@ object FirebaseManager {
 
                     if (!isOldTimestamp && !isDuplicate) {
                         lastChatOutboxTimestamp = timestamp
+                        Log.i(TAG, "AI response received: \"${text.substring(0, minOf(60, text.length))}\"")
                         addOrchestratorMessage(text)
                         // Notify SensorService to show system notification
                         onChatMessage?.invoke(text)
                     } else {
-                        Log.d(TAG, "Skipping duplicate outbox message: ${text.substring(0, minOf(40, text.length))}")
+                        Log.d(TAG, "Skipping duplicate outbox message: isOld=$isOldTimestamp isDup=$isDuplicate")
                     }
                 }
             }
@@ -456,9 +457,15 @@ object FirebaseManager {
      * The Node.js orchestrator listens on this path and responds via chat_outbox.
      */
     fun sendChatMessage(text: String) {
-        val ref = deviceRef ?: return
+        val ref = deviceRef
+        if (ref == null) {
+            Log.e(TAG, "Cannot send chat message — Firebase not connected (deviceRef is null)")
+            addSystemMessage("Zprávu nelze odeslat — nejste připojeni k Firebase")
+            return
+        }
         if (text.isBlank()) return
 
+        Log.i(TAG, "Sending chat message: \"${text.substring(0, minOf(60, text.length))}\"")
         addUserMessage(text)
 
         val message = mapOf(
@@ -468,11 +475,11 @@ object FirebaseManager {
 
         ref.child("chat_inbox").setValue(message)
             .addOnSuccessListener {
-                Log.d(TAG, "Chat -> Firebase: ${text.substring(0, minOf(80, text.length))}")
+                Log.i(TAG, "Chat message sent to Firebase: \"${text.substring(0, minOf(60, text.length))}\"")
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Failed to send chat message: ${e.message}")
-                addSystemMessage("Chyba odesilani: ${e.message}")
+                addSystemMessage("Chyba odesílání: ${e.message}")
             }
     }
 
