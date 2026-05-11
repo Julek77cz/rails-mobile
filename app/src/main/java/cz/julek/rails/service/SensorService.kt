@@ -304,6 +304,17 @@ class SensorService : Service() {
             cancelBlockNotification()
             stopBlockingMonitor()
         }
+
+        // KICK_ONCE — single kick to home screen + warning notification (no blocking loop)
+        FirebaseManager.onKickOnce = { message ->
+            Log.w(TAG, "KICK_ONCE callback: $message")
+
+            // Single kick to home screen
+            kickToHomeScreen()
+
+            // Show warning notification (no blocking, no overlay)
+            showKickOnceNotification(message)
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -749,6 +760,34 @@ class SensorService : Service() {
         notificationManager.notify(2001, notification)
 
         Log.i(TAG, "Intervention notification shown: ${previewText}")
+    }
+
+    private fun showKickOnceNotification(message: String) {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 2, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val spannedMessage = message.parseMarkdownToSpanned()
+
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID_ALERTS)
+            .setContentTitle("Rails — ⚠️ Upozornění")
+            .setContentText(spannedMessage)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(spannedMessage))
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager.notify(2002, notification)
+
+        Log.i(TAG, "Kick-once notification shown: ${message.substring(0, minOf(60, message.length))}")
     }
 
     private fun showChatNotification(text: String) {

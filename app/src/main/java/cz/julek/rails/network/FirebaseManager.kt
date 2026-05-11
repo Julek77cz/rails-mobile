@@ -106,6 +106,7 @@ object FirebaseManager {
     var onBlockApps: ((apps: List<String>, message: String) -> Unit)? = null
     var onUnblockApps: ((message: String) -> Unit)? = null
     var onLockScreen: ((message: String) -> Unit)? = null
+    var onKickOnce: ((message: String) -> Unit)? = null
 
     // Chat message callback — fired when AI sends a response (for system notification)
     var onChatMessage: ((text: String) -> Unit)? = null
@@ -307,6 +308,12 @@ object FirebaseManager {
                         Log.w(TAG, "LOCK_SCREEN command received: $message")
                         addSystemMessage("🔒 Zamkni telefon: $message")
                         onLockScreen?.invoke(message)
+                    }
+
+                    "KICK_ONCE" -> {
+                        Log.w(TAG, "KICK_ONCE command received: $message")
+                        addSystemMessage("⚠️ Upozornění: $message")
+                        onKickOnce?.invoke(message)
                     }
 
                     "CLEAR" -> {
