@@ -192,6 +192,44 @@ class AppWatcherService : AccessibilityService() {
                 Log.i(TAG, "forceCheckAndKick: $fg is NOT blocked")
             }
         }
+
+        /**
+         * KICK_ONCE: Single Home press via AccessibilityService.
+         * Called by SensorService when KICK_ONCE command is received.
+         * Uses performGlobalAction(GLOBAL_ACTION_HOME) which is the most reliable
+         * way to kick the user to the home screen — works at the system level,
+         * unlike a HOME intent which many launchers/OEMs ignore.
+         *
+         * @return true if the kick was performed, false if AccessibilityService is not available
+         */
+        fun performKickOnce(): Boolean {
+            val svc = instance
+            if (svc == null) {
+                Log.e(TAG, "RAILS_DEBUG: performKickOnce — AccessibilityService instance is NULL! " +
+                        "AccessibilityService is not running or not enabled. " +
+                        "Falling back to HOME intent from SensorService.")
+                return false
+            }
+
+            try {
+                val result = svc.performGlobalAction(GLOBAL_ACTION_HOME)
+                Log.e(TAG, "RAILS_DEBUG: performKickOnce — performGlobalAction(HOME) = $result")
+
+                if (result) {
+                    Log.e(TAG, "RAILS_DEBUG: KICK_ONCE successful via AccessibilityService")
+                } else {
+                    Log.e(TAG, "RAILS_DEBUG: KICK_ONCE performGlobalAction returned false — " +
+                            "service might not have focus or action is not available")
+                    // Try the HOME intent as fallback within the AccessibilityService
+                    svc.goToHomeScreen()
+                    Log.e(TAG, "RAILS_DEBUG: KICK_ONCE fallback HOME intent sent from AccessibilityService")
+                }
+                return result
+            } catch (e: Exception) {
+                Log.e(TAG, "RAILS_DEBUG: performKickOnce CRASHED: ${e.message}", e)
+                return false
+            }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════

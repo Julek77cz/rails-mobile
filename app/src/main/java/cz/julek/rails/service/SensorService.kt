@@ -240,6 +240,8 @@ class SensorService : Service() {
     // ═══════════════════════════════════════════════════════════════════
 
     private fun registerFirebaseCallbacks() {
+        Log.e(TAG, "RAILS_DEBUG: registerFirebaseCallbacks() called — registering all command callbacks")
+
         // INTERVENE — show notification + optional overlay
         FirebaseManager.onIntervene = { message ->
             Log.w(TAG, "INTERVENE callback: $message")
@@ -307,13 +309,24 @@ class SensorService : Service() {
 
         // KICK_ONCE — single kick to home screen + warning notification (no blocking loop)
         FirebaseManager.onKickOnce = { message ->
-            Log.w(TAG, "KICK_ONCE callback: $message")
+            Log.e(TAG, "RAILS_DEBUG: KICK_ONCE callback fired — message=$message")
 
-            // Single kick to home screen
-            kickToHomeScreen()
+            // PRIMARY: Use AccessibilityService performGlobalAction(GLOBAL_ACTION_HOME)
+            // This is the most reliable kick — works at system level, just like BLOCK_APPS does.
+            val accessibilityKickResult = AppWatcherService.performKickOnce()
+            Log.e(TAG, "RAILS_DEBUG: KICK_ONCE AccessibilityService kick result=$accessibilityKickResult")
+
+            // FALLBACK: If AccessibilityService is not available, try HOME intent
+            // (less reliable — some launchers/OEMs ignore HOME intents from services)
+            if (!accessibilityKickResult) {
+                Log.e(TAG, "RAILS_DEBUG: KICK_ONCE falling back to HOME intent from SensorService")
+                kickToHomeScreen()
+            }
 
             // Show warning notification (no blocking, no overlay)
             showKickOnceNotification(message)
+
+            Log.e(TAG, "RAILS_DEBUG: KICK_ONCE completed — accessibility=$accessibilityKickResult, notification shown")
         }
     }
 
@@ -455,9 +468,9 @@ class SensorService : Service() {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
             }
             startActivity(homeIntent)
-            Log.i(TAG, "Kick: user sent to home screen")
+            Log.e(TAG, "RAILS_DEBUG: kickToHomeScreen — HOME intent sent successfully")
         } catch (e: Exception) {
-            Log.e(TAG, "Kick failed: ${e.message}")
+            Log.e(TAG, "RAILS_DEBUG: kickToHomeScreen FAILED — ${e.message}")
         }
     }
 
@@ -763,6 +776,8 @@ class SensorService : Service() {
     }
 
     private fun showKickOnceNotification(message: String) {
+        Log.e(TAG, "RAILS_DEBUG: showKickOnceNotification called — message length=${message.length}")
+
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -787,7 +802,7 @@ class SensorService : Service() {
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(2002, notification)
 
-        Log.i(TAG, "Kick-once notification shown: ${message.substring(0, minOf(60, message.length))}")
+        Log.e(TAG, "RAILS_DEBUG: Kick-once notification POSTED (id=2002, channel=$CHANNEL_ID_ALERTS)")
     }
 
     private fun showChatNotification(text: String) {

@@ -258,8 +258,13 @@ object FirebaseManager {
                 val action = data["action"] as? String ?: return
                 val timestamp = (data["timestamp"] as? Number)?.toLong() ?: 0L
 
+                Log.d(TAG, "RAILS_DEBUG: Command listener fired — action=$action, timestamp=$timestamp, lastTimestamp=$lastCommandTimestamp")
+
                 // Skip already-processed commands (prevents re-processing on reconnect)
-                if (timestamp <= lastCommandTimestamp && lastCommandTimestamp > 0) return
+                if (timestamp <= lastCommandTimestamp && lastCommandTimestamp > 0) {
+                    Log.d(TAG, "RAILS_DEBUG: Command skipped (duplicate/old) — timestamp=$timestamp <= lastTimestamp=$lastCommandTimestamp")
+                    return
+                }
                 lastCommandTimestamp = timestamp
 
                 val message = data["message"] as? String ?: ""
@@ -311,7 +316,8 @@ object FirebaseManager {
                     }
 
                     "KICK_ONCE" -> {
-                        Log.w(TAG, "KICK_ONCE command received: $message")
+                        Log.e(TAG, "RAILS_DEBUG: KICK_ONCE command received from Firebase — message=$message, timestamp=$timestamp")
+                        Log.e(TAG, "RAILS_DEBUG: KICK_ONCE onKickOnce callback is ${if (onKickOnce != null) "REGISTERED" else "NULL (BUG!)"}")
                         addSystemMessage("⚠️ Upozornění: $message")
                         onKickOnce?.invoke(message)
                     }
