@@ -277,7 +277,7 @@ fun DashboardScreen() {
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Icon(
-                    if (allGranted) Icons.Filled.CheckCircle else Icons.Filled.ErrorOutline,
+                    if (allGranted) Icons.Filled.CheckCircle else Icons.Outlined.ErrorOutline,
                     contentDescription = null,
                     tint = if (allGranted) Color(0xFF2E7D32) else Color(0xFFE65100)
                 )
